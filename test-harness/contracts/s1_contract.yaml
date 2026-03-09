@@ -1,0 +1,118 @@
+# s1 ingestion service contract
+# defines what the ingestion service must do
+
+service: s1_ingestion
+version: "1.0"
+description: "high-performance csv file ingestion service"
+
+interfaces:
+  # signal handling
+  signals:
+    sigterm:
+      behavior: graceful_shutdown
+      timeout_seconds: 30
+      expected_exit_code: 0
+      
+    sighup:
+      behavior: reload_config
+      expected_log_message: "configuration reloaded"
+      
+    sigusr1:
+      behavior: status_dump
+      expected_action: log_internal_state
+      
+    sigusr2:
+      behavior: toggle_log_level
+      expected_action: switch_info_debug
+  
+  # posix message queue
+  posix_mq:
+    queue_name: /ws_ingest_status
+    message_format:
+      msg_type:
+        type: uint32
+        values: [1, 2, 3, 4]  # started, progress, completed, error
+      sequence_id:
+        type: uint32
+      filename:
+        type: string
+        max_length: 256
+      records_processed:
+        type: uint64
+      records_failed:
+        type: uint64
+      progress_percent:
+        type: float64
+        range: [0.0, 100.0]
+      error_message:
+        type: string
+        max_length: 512
+  
+  # filesystem interface
+  filesystem:
+    watch_directory:
+      path: /data/csv
+      events: [create, close_write, moved_to]
+      
+    processed_directory:
+      path: /data/processed
+      
+    error_directory:
+      path: /data/error
+  
+  # database interface
+  database:
+    driver: sqlite3
+    tables_written:
+      - weather_data
+      - ingest_log
+    
+    wal_mode: required
+    isolation: serializable
+
+performance:
+  throughput_mbps:
+    target: 100
+    minimum: 50
+    
+  latency_first_record_seconds:
+    target: 5
+    maximum: 10
+    
+  memory_max_mb:
+    target: 1024
+    maximum: 2048
+
+validation:
+  csv_parsing:
+    required_columns:
+      - timestamp
+      - temperature
+      - humidity
+    
+    optional_columns:
+      - pressure
+      - wind_speed
+      - wind_direction
+      - precipitation
+    
+    timestamp_format: "%Y-%m-%d %H:%M:%S"
+    delimiter: ","
+    
+  data_quality:
+    temperature_range: [-100.0, 100.0]
+    humidity_range: [0.0, 100.0]
+    pressure_range: [800.0, 1100.0]
+    
+    reject_invalid_rows: false
+    skip_malformed: true
+
+requirements:
+  - service_must_start
+  - service_must_handle_sigterm
+  - service_must_ingest_csv
+  - service_must_validate_data
+  - service_must_write_to_database
+  - service_must_report_progress
+  - service_must_meet_performance_targets
+  - service_must_not_leak_memory

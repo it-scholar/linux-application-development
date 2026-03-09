@@ -1,0 +1,110 @@
+# s4 discovery service contract
+
+service: s4_discovery
+version: "1.0"
+description: "peer discovery and high availability coordinator"
+
+interfaces:
+  signals:
+    sigterm:
+      behavior: graceful_shutdown
+      timeout_seconds: 15
+      
+    sighup:
+      behavior: reload_config
+  
+  network:
+    udp:
+      broadcast:
+        enabled: true
+        port: 5000
+        interval_seconds: 5
+        ttl: 1
+        
+      multicast:
+        enabled: false
+        group: "239.255.42.42"
+        
+    tcp:
+      health_check_port: 5001
+      replication_port: 8443
+      
+  database:
+    tables_written:
+      - peer_stations
+      - election_log
+      - replication_peers
+    
+    tables_read:
+      - weather_data
+
+discovery:
+  beacon:
+    interval_seconds: 5
+    max_age_seconds: 30
+    
+  health_checks:
+    interval_seconds: 10
+    timeout_seconds: 5
+    failures_before_down: 3
+    recovery_interval_seconds: 60
+
+election:
+  enabled: true
+  algorithm: bully
+  coordinator_timeout_seconds: 15
+  split_brain_prevention: true
+
+replication:
+  enabled: true
+  mode: async
+  sync_interval_seconds: 60
+  batch_size: 1000
+  lag_threshold_seconds: 300
+
+mtls:
+  enabled: true
+  verify_peer: true
+  min_tls_version: "1.3"
+  cipher_suites:
+    - ECDHE+AES256
+
+performance:
+  election_time_seconds:
+    target: 30
+    maximum: 60
+    
+  failover_time_seconds:
+    target: 30
+    maximum: 60
+    
+  peer_capacity:
+    target: 100
+    maximum: 1000
+
+beacon_format:
+  magic: 0x57534243  # 'WSBC'
+  version: 1
+  fields:
+    - station_id
+    - timestamp
+    - query_port
+    - replication_port
+    - data_start
+    - data_end
+    - is_leader
+    - health_status
+    - hostname
+    - capabilities
+    - tls_fingerprint
+
+requirements:
+  - service_must_start
+  - service_must_broadcast_beacons
+  - service_must_track_peers
+  - service_must_monitor_health
+  - service_must_run_election
+  - service_must_handle_leader_failover
+  - service_must_support_replication
+  - service_must_use_mtls
+  - service_must_not_cause_split_brain

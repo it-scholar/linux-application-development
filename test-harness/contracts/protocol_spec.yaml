@@ -1,0 +1,159 @@
+# binary protocol specification
+# defines the wire format for service communication
+
+protocol:
+  name: weather_station_binary
+  version: 1
+  
+header:
+  size_bytes: 16
+  endianness: big
+  
+  fields:
+    magic:
+      offset: 0
+      type: uint32
+      value: 0x57454154  # 'WEAT'
+      
+    version:
+      offset: 4
+      type: uint16
+      current: 1
+      
+    msg_type:
+      offset: 6
+      type: uint16
+      
+    payload_len:
+      offset: 8
+      type: uint32
+      max_value: 10485760  # 10MB
+      
+    sequence_id:
+      offset: 12
+      type: uint32
+
+messages:
+  # control messages (0x00-0x0F)
+  ping:
+    type_id: 0x00
+    request: empty
+    response: pong
+    
+  pong:
+    type_id: 0x01
+    payload:
+      timestamp: uint64
+      
+  hello:
+    type_id: 0x02
+    
+  goodbye:
+    type_id: 0x03
+
+  # query messages (0x10-0x1F)
+  query:
+    type_id: 0x10
+    request:
+      start_time: uint64
+      end_time: uint64
+      station_id: uint32
+      metric_mask: uint16
+      aggregation: uint8
+      format: uint8
+    response: query_resp
+    
+  query_resp:
+    type_id: 0x11
+    payload:
+      total_records: uint32
+      chunk_count: uint32
+      status_code: uint16
+      status_message: string[128]
+    supports_streaming: true
+    
+  stream_chunk:
+    type_id: 0x13
+    payload:
+      chunk_number: uint32
+      record_count: uint32
+      flags: uint32
+      data: bytes
+      
+  cancel:
+    type_id: 0x15
+
+  # discovery messages (0x20-0x2F)
+  discovery:
+    type_id: 0x20
+    request:
+      flags: uint32
+      query: string[256]
+    response: discovery_resp
+    
+  discovery_resp:
+    type_id: 0x21
+    payload:
+      station_id: uint32
+      timestamp: uint32
+      query_port: uint16
+      replication_port: uint16
+      data_start: uint32
+      data_end: uint32
+      capabilities: uint16
+      is_leader: uint8
+      status: uint8
+      hostname: string[64]
+      version: string[32]
+      tls_fingerprint: bytes[32]
+
+  # replication messages (0x30-0x3F)
+  replicate:
+    type_id: 0x30
+    payload:
+      records: array
+    response: replicate_ack
+    
+  replicate_ack:
+    type_id: 0x31
+    payload:
+      ack_count: uint32
+      last_sequence: uint32
+      
+  sync_request:
+    type_id: 0x32
+    
+  sync_response:
+    type_id: 0x33
+
+  # error messages (0xF0-0xFF)
+  error:
+    type_id: 0xF0
+    payload:
+      error_code: uint16
+      message: string[256]
+      
+  reject:
+    type_id: 0xF1
+    
+  not_supported:
+    type_id: 0xF2
+
+error_codes:
+  0: ok
+  1: invalid_msg
+  2: unsupported
+  3: auth_failed
+  4: rate_limited
+  5: timeout
+  6: server_error
+  7: not_found
+
+version_compatibility:
+  - version: 1
+    status: current
+    supported: true
+    
+  - version: 2
+    status: draft
+    supported: false

@@ -1,0 +1,101 @@
+# s3 query service contract
+
+service: s3_query
+version: "1.0"
+description: "tcp query api service with http metrics"
+
+interfaces:
+  signals:
+    sigterm:
+      behavior: graceful_shutdown
+      timeout_seconds: 30
+      
+    sighup:
+      behavior: reload_config
+  
+  network:
+    tcp:
+      bind_address: "0.0.0.0"
+      port: 8080
+      protocol: binary
+      
+    http:
+      bind_address: "0.0.0.0"
+      port: 9090
+      endpoints:
+        /health:
+          method: GET
+          response: json
+          
+        /metrics:
+          method: GET
+          format: prometheus
+          
+        /query:
+          method: GET
+          parameters:
+            - station
+            - from
+            - to
+            - metrics
+  
+  database:
+    tables_read:
+      - weather_data
+      - hourly_stats
+      - daily_stats
+    
+    read_only: true
+
+performance:
+  query_latency_ms:
+    p50_target: 5
+    p99_target: 10
+    p99_maximum: 50
+    
+  throughput_qps:
+    target: 1000
+    minimum: 500
+    
+  concurrent_connections:
+    target: 1000
+    maximum: 10000
+    
+  thread_pool_size:
+    min: 2
+    max: 32
+    default: 8
+
+protocol:
+  version: 1
+  magic: 0x57454154  # 'WEAT'
+  header_size: 16
+  
+  messages:
+    ping:
+      type_id: 0x00
+      
+    query:
+      type_id: 0x10
+      requires_response: true
+      
+    query_resp:
+      type_id: 0x11
+      supports_streaming: true
+
+rate_limiting:
+  enabled: true
+  algorithm: token_bucket
+  requests_per_minute: 600
+  burst_size: 100
+
+requirements:
+  - service_must_start
+  - service_must_handle_signals
+  - service_must_accept_tcp_connections
+  - service_must_accept_http_connections
+  - service_must_respond_to_queries
+  - service_must_export_metrics
+  - service_must_enforce_rate_limits
+  - service_must_meet_latency_targets
+  - service_must_not_leak_memory

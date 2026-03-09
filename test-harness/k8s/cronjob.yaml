@@ -1,0 +1,147 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-harness
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-harness-config
+  namespace: test-harness
+data:
+  config.yaml: |
+    log_level: info
+    output_format: json
+    parallel: 4
+    fail_fast: false
+    services:
+      s1_ingestion:
+        binary: ./services/s1/ingestion
+        config: ./services/s1/ingestion.ini
+      s2_processor:
+        binary: ./services/s2/processor
+        config: ./services/s2/processor.ini
+      s3_api:
+        binary: ./services/s3/query
+        config: ./services/s3/query.ini
+      s4_cluster:
+        binary: ./services/s4/discovery
+        config: ./services/s4/discovery.ini
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-harness-data
+  namespace: test-harness
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: test-harness-scheduled
+  namespace: test-harness
+spec:
+  schedule: "0 2 * * *"  # Run daily at 2 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: test-harness
+            image: weather-station-test:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - test-harness
+            - ci
+            - --fail-threshold
+            - "80"
+            env:
+            - name: TEST_HARNESS_LOG_LEVEL
+              value: "info"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+                  optional: true
+            volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+            - name: data
+              mountPath: /app/data
+            - name: reports
+              mountPath: /app/reports
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "2000m"
+          volumes:
+          - name: config
+            configMap:
+              name: test-harness-config
+          - name: data
+            persistentVolumeClaim:
+              claimName: test-harness-data
+          - name: reports
+            emptyDir: {}
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-harness-manual
+  namespace: test-harness
+spec:
+  template:
+    spec:
+      containers:
+      - name: test-harness
+        image: weather-station-test:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - test-harness
+        - ci
+        - --fail-threshold
+        - "80"
+        - --verbose
+        env:
+        - name: TEST_HARNESS_LOG_LEVEL
+          value: "debug"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config.yaml
+          subPath: config.yaml
+        - name: data
+          mountPath: /app/data
+        - name: reports
+          mountPath: /app/reports
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+      volumes:
+      - name: config
+        configMap:
+          name: test-harness-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: test-harness-data
+      - name: reports
+        emptyDir: {}
+      restartPolicy: Never
+  backoffLimit: 1

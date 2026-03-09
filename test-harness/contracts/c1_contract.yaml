@@ -1,0 +1,78 @@
+# c1 cli client contract
+
+service: c1_cli
+version: "1.0"
+description: "command-line interface for querying weather data"
+
+interfaces:
+  network:
+    connection:
+      protocol: tcp
+      default_host: localhost
+      default_port: 8080
+      timeout_seconds: 30
+      
+    protocols:
+      - binary
+      - http
+  
+  commands:
+    query:
+      description: execute query
+      parameters:
+        - station
+        - from
+        - to
+        - metrics
+        - aggregation
+      output_formats:
+        - table
+        - csv
+        - json
+        
+    status:
+      description: show station status
+      
+    peers:
+      description: list peer stations
+      
+    config:
+      description: manage configuration
+
+configuration:
+  file_format: ini
+  supported_formats:
+    - ini
+    - json
+    - environment
+  
+  sections:
+    connection:
+      - query_host
+      - query_port
+      - timeout_seconds
+      - retry_attempts
+      
+    output:
+      - default_format
+      - max_rows
+      - pretty_print
+      - show_timestamps
+      - show_units
+      
+    display:
+      - date_format
+      - timezone
+      - temperature_unit
+      - pressure_unit
+      - speed_unit
+      - color_enabled
+
+requirements:
+  - cli_must_connect_to_query_service
+  - cli_must_execute_queries
+  - cli_must_format_output
+  - cli_must_support_interactive_mode
+  - cli_must_handle_connection_errors
+  - cli_must_respect_configuration
+  - cli_must_exit_cleanly

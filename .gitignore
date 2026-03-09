@@ -1,0 +1,223 @@
+# =============================================================================
+# C / C++ Build Artifacts
+# =============================================================================
+# Object files
+*.o
+*.obj
+*.elf
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Coverage files
+*.gcno
+*.gcda
+*.gcov
+
+# =============================================================================
+# Go Build Artifacts
+# =============================================================================
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+*.cover
+
+# Go workspace file
+go.work
+
+# =============================================================================
+# Build Directories
+# =============================================================================
+build/
+dist/
+target/
+bin/
+obj/
+
+# =============================================================================
+# Dependency Directories
+# =============================================================================
+# Vendor directories
+vendor/
+
+# =============================================================================
+# IDE and Editor Files
+# =============================================================================
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse
+.project
+.classpath
+.settings/
+
+# Vim
+*.swp
+*.swo
+*~
+.vim/
+
+# Emacs
+*~
+#*#
+.#*
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# =============================================================================
+# OS Generated Files
+# =============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.nfs*
+
+# =============================================================================
+# Testing and Coverage
+# =============================================================================
+# Test output
+test-results/
+coverage/
+*.lcov
+
+# JUnit reports
+TEST-*.xml
+
+# =============================================================================
+# Data and Logs
+# =============================================================================
+# Data directories
+data/
+*.csv
+*.dat
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# =============================================================================
+# Configuration Files (Environment-specific)
+# =============================================================================
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Local configuration
+config.local.yaml
+config.local.json
+
+# =============================================================================
+# Weather Station Specific
+# =============================================================================
+# Service binaries
+services/*/bin/
+services/*/*-service
+services/*/*.exe
+
+# Service PID files
+*.pid
+
+# Generated documentation
+docs/generated/
+
+# NOAA data files (large)
+*.dly
+weather-data/
+noaa-data/
+
+# Reports
+reports/
+*.html
+*.xml
+!test-harness/contracts/*.yaml
+
+# =============================================================================
+# Git
+# =============================================================================
+# Git merge conflicts
+*.orig
+*.rej
+
+# =============================================================================
+# Misc
+# =============================================================================
+# Package files
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Certificates
+*.pem
+*.key
+*.crt
+!test-harness/contracts/*.yaml

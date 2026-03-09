@@ -1,0 +1,93 @@
+# s2 aggregation service contract
+
+service: s2_aggregation
+version: "1.0"
+description: "background statistical aggregation service"
+
+interfaces:
+  signals:
+    sigterm:
+      behavior: graceful_shutdown
+      timeout_seconds: 60
+      expected_exit_code: 0
+      
+    sighup:
+      behavior: reload_config
+  
+  posix_mq:
+    command_queue: /ws_agg_cmd
+    commands:
+      - new_data
+      - run_hourly
+      - run_daily
+      - status
+      - shutdown
+      
+    status_queue: /ws_agg_status
+    message_format:
+      response_type: uint32
+      worker_id: uint32
+      jobs_completed: uint64
+      jobs_failed: uint64
+      cpu_percent: float64
+      memory_mb: float64
+      status_message: string[256]
+  
+  database:
+    tables_written:
+      - hourly_stats
+      - daily_stats
+      - aggregation_jobs
+    
+    tables_read:
+      - weather_data
+      - ingest_log
+
+performance:
+  workers:
+    min: 1
+    max: 8
+    default: 4
+    
+  aggregation_speed_records_per_second:
+    target: 100000
+    minimum: 50000
+    
+  memory_per_worker_mb:
+    target: 100
+    maximum: 256
+
+aggregation:
+  time_windows:
+    hourly:
+      enabled: true
+      schedule: "0 * * * *"
+      
+    daily:
+      enabled: true
+      schedule: "0 0 * * *"
+      
+    weekly:
+      enabled: false
+  
+  statistics:
+    - min
+    - max
+    - avg
+    - count
+    
+  metrics:
+    - temperature
+    - humidity
+    - pressure
+    - wind_speed
+
+requirements:
+  - service_must_start
+  - service_must_handle_signals
+  - service_must_create_workers
+  - service_must_listen_for_commands
+  - service_must_aggregate_hourly
+  - service_must_aggregate_daily
+  - service_must_write_to_database
+  - service_must_not_leak_memory
