@@ -1,0 +1,162 @@
+name: Test Harness CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'test-harness/**'
+      - '.github/workflows/test-harness.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'test-harness/**'
+      - '.github/workflows/test-harness.yml'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Install golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+        working-directory: test-harness
+        args: --timeout=5m
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('test-harness/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      working-directory: test-harness
+      run: go mod download
+
+    - name: Run tests
+      working-directory: test-harness
+      run: go test -v -race -coverprofile=coverage.out ./pkg/...
+
+    - name: Generate coverage report
+      working-directory: test-harness
+      run: go tool cover -html=coverage.out -o coverage.html
+
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: test-harness/coverage.html
+
+    - name: Comment coverage on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const coverage = fs.readFileSync('test-harness/coverage.out', 'utf8');
+          const lines = coverage.split('\n');
+          let total = 0;
+          let covered = 0;
+          
+          for (const line of lines) {
+            if (line.includes('mode:')) continue;
+            const parts = line.split(' ');
+            if (parts.length >= 3) {
+              const stats = parts[2].split(',');
+              if (stats.length >= 2) {
+                const [stmts, hits] = stats[0].split('.');
+                total += parseInt(stmts) || 0;
+                covered += parseInt(hits) || 0;
+              }
+            }
+          }
+          
+          const percentage = total > 0 ? ((covered / total) * 100).toFixed(2) : 0;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 📊 Test Coverage Report\n\n**Coverage: ${percentage}%**\n\n- Total statements: ${total}\n- Covered statements: ${covered}\n\n[View detailed coverage report](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+          });
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('test-harness/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Build binary
+      working-directory: test-harness
+      run: go build -ldflags="-w -s" -o bin/test-harness ./cmd/harness
+
+    - name: Test binary
+      working-directory: test-harness
+      run: |
+        ./bin/test-harness --help
+        ./bin/test-harness validate --help
+        ./bin/test-harness test --help
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-harness-binary
+        path: test-harness/bin/test-harness
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      working-directory: test-harness
+      run: |
+        docker build -t weather-station-test:latest .
+        docker images
+
+    - name: Test Docker image
+      working-directory: test-harness
+      run: |
+        docker run --rm weather-station-test:latest --help
+        docker run --rm weather-station-test:latest validate --help
