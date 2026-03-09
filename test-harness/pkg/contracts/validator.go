@@ -167,7 +167,10 @@ func (v *Validator) checkInterfaces(contract *Contract) error {
 	// check at least one interface is defined
 	hasInterface := contract.Interfaces.POSIXMQ.QueueName != "" ||
 		contract.Interfaces.Network.TCP.BindAddress != "" ||
-		contract.Interfaces.Filesystem.WatchDirectory.Path != ""
+		contract.Interfaces.Network.TCP.Protocol != "" ||
+		contract.Interfaces.Network.UDP.Broadcast.Enabled ||
+		contract.Interfaces.Filesystem.WatchDirectory.Path != "" ||
+		contract.Interfaces.Database.Driver != ""
 
 	if !hasInterface {
 		return fmt.Errorf("no interfaces defined in contract")
@@ -191,7 +194,7 @@ func GetContractPath(serviceName string) string {
 		"aggregation": "aggregation_contract.yaml",
 		"query":       "query_contract.yaml",
 		"discovery":   "discovery_contract.yaml",
-		"c1_cli":      "c1_contract.yaml",
+		"cli":         "cli_contract.yaml",
 	}
 
 	filename, ok := contractMap[serviceName]
