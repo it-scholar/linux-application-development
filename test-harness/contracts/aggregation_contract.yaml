@@ -1,0 +1,73 @@
+# aggregation service contract
+# defines what the aggregation service must do
+
+service: aggregation
+version: "1.0"
+description: "data aggregation and processing service"
+
+interfaces:
+  # signal handling
+  signals:
+    sigterm:
+      behavior: graceful_shutdown
+      timeout_seconds: 30
+      expected_exit_code: 0
+      
+    sighup:
+      behavior: reload_config
+      expected_log_message: "configuration reloaded"
+      
+    sigusr1:
+      behavior: trigger_aggregation
+      expected_action: run_aggregation_immediately
+  
+  # database interface
+  database:
+    driver: sqlite3
+    input_tables:
+      - weather_data
+    output_tables:
+      - daily_aggregates
+      - hourly_aggregates
+    
+    wal_mode: required
+    isolation: serializable
+
+performance:
+  throughput_mbps:
+    target: 100
+    minimum: 50
+    
+  latency_first_record_seconds:
+    target: 10
+    maximum: 30
+    
+  memory_max_mb:
+    target: 512
+    maximum: 1024
+
+aggregation:
+  supported_metrics:
+    - TMAX
+    - TMIN
+    - PRCP
+    - SNOW
+    
+  time_windows:
+    - daily
+    - hourly
+    
+  statistics:
+    - avg
+    - min
+    - max
+    - count
+
+requirements:
+  - service_must_start
+  - service_must_handle_sigterm
+  - service_must_read_from_input_database
+  - service_must_calculate_aggregates
+  - service_must_write_to_output_database
+  - service_must_meet_performance_targets
+  - service_must_not_leak_memory
