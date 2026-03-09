@@ -1,0 +1,99 @@
+# query service contract
+# defines what the query service must do
+
+service: query
+version: "1.0"
+description: "http rest api for weather data queries"
+
+interfaces:
+  # signal handling
+  signals:
+    sigterm:
+      behavior: graceful_shutdown
+      timeout_seconds: 30
+      expected_exit_code: 0
+      
+    sighup:
+      behavior: reload_config
+      expected_log_message: "configuration reloaded"
+  
+  # network interface
+  network:
+    tcp:
+      bind_address: "0.0.0.0"
+      port: 8080
+      protocol: "http"
+  
+  # database interface
+  database:
+    driver: sqlite3
+    tables_read:
+      - daily_aggregates
+      - hourly_aggregates
+    
+    wal_mode: required
+    read_only: true
+
+performance:
+  throughput_mbps:
+    target: 100
+    minimum: 50
+    
+  query_latency_ms:
+    target: 10
+    maximum: 100
+    
+  concurrent_connections:
+    target: 100
+    minimum: 50
+    
+  memory_max_mb:
+    target: 256
+    maximum: 512
+
+api:
+  endpoints:
+    - path: "/health"
+      method: "GET"
+      description: "health check endpoint"
+      
+    - path: "/api/v1/weather/daily"
+      method: "GET"
+      description: "query daily aggregates"
+      parameters:
+        - name: "station_id"
+          type: "string"
+          required: false
+        - name: "date"
+          type: "string"
+          required: false
+        - name: "metric"
+          type: "string"
+          required: false
+          
+    - path: "/api/v1/weather/hourly"
+      method: "GET"
+      description: "query hourly aggregates"
+      parameters:
+        - name: "station_id"
+          type: "string"
+          required: false
+        - name: "hour"
+          type: "string"
+          required: false
+        - name: "metric"
+          type: "string"
+          required: false
+          
+    - path: "/api/v1/stations"
+      method: "GET"
+      description: "list all stations"
+
+requirements:
+  - service_must_start
+  - service_must_handle_sigterm
+  - service_must_respond_to_http_requests
+  - service_must_return_valid_json
+  - service_must_handle_concurrent_connections
+  - service_must_meet_latency_targets
+  - service_must_not_leak_memory
