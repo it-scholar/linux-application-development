@@ -1,0 +1,67 @@
+# discovery service contract
+# defines what the discovery service must do
+
+service: discovery
+version: "1.0"
+description: "peer-to-peer service discovery and leader election"
+
+interfaces:
+  # signal handling
+  signals:
+    sigterm:
+      behavior: graceful_shutdown
+      timeout_seconds: 30
+      expected_exit_code: 0
+      
+    sighup:
+      behavior: reload_config
+      expected_log_message: "configuration reloaded"
+  
+  # network interface
+  network:
+    udp:
+      broadcast:
+        enabled: true
+        port: 9000
+        interval_seconds: 5
+
+performance:
+  throughput_mbps:
+    target: 10
+    minimum: 1
+    
+  latency_first_record_seconds:
+    target: 1
+    maximum: 5
+    
+  memory_max_mb:
+    target: 64
+    maximum: 128
+
+discovery:
+  protocol: "udp_broadcast"
+  message_types:
+    - DISCOVER
+    - HEARTBEAT
+    - ELECTION
+    - COORDINATOR
+    
+  election_algorithm: "bully"
+  
+  cluster_size:
+    min: 1
+    max: 32
+    
+  heartbeat:
+    interval_ms: 1000
+    timeout_ms: 5000
+
+requirements:
+  - service_must_start
+  - service_must_handle_sigterm
+  - service_must_discover_peers
+  - service_must_participate_in_election
+  - service_must_send_heartbeats
+  - service_must_detect_leader_failure
+  - service_must_meet_latency_targets
+  - service_must_not_leak_memory
