@@ -1,0 +1,83 @@
+# cli client contract
+# defines what the cli client must do
+
+service: cli
+version: "1.0"
+description: "command-line interface for weather data queries"
+
+interfaces:
+  # signal handling (for graceful exit)
+  signals:
+    sigterm:
+      behavior: graceful_exit
+      expected_exit_code: 0
+      
+    sighup:
+      behavior: reload_config
+      expected_log_message: "configuration reloaded"
+      
+    sigint:
+      behavior: graceful_exit
+      expected_exit_code: 0
+  
+  # network interface
+  network:
+    tcp:
+      bind_address: ""
+      port: 0
+      protocol: "http_client"
+
+performance:
+  throughput_mbps:
+    target: 10
+    minimum: 1
+    
+  latency_first_record_seconds:
+    target: 1
+    maximum: 5
+
+requirements:
+  - client_must_connect_to_api
+  - client_must_parse_json_responses
+  - client_must_display_data_in_table_format
+  - client_must_display_data_in_json_format
+  - client_must_display_data_in_csv_format
+  - client_must_support_query_parameters
+  - client_must_handle_connection_errors
+  - client_must_exit_with_appropriate_codes
+
+commands:
+  - name: "daily"
+    description: "query daily weather aggregates"
+    arguments:
+      - name: "station"
+        required: false
+      - name: "date"
+        required: false
+      - name: "metric"
+        required: false
+        
+  - name: "hourly"
+    description: "query hourly weather aggregates"
+    arguments:
+      - name: "station"
+        required: false
+      - name: "hour"
+        required: false
+      - name: "metric"
+        required: false
+        
+  - name: "stations"
+    description: "list all weather stations"
+    arguments: []
+    
+  - name: "health"
+    description: "check api health"
+    arguments: []
+
+exit_codes:
+  0: "success"
+  1: "general_error"
+  2: "invalid_arguments"
+  3: "api_connection_error"
+  4: "no_data_found"
