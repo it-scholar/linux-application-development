@@ -12,7 +12,7 @@ var validateCmd = &cobra.Command{
 
 examples:
   # validate s1 ingestion service
-  test-harness validate --service s1_ingestion
+  test-harness validate --service ingestion
 
   # validate with specific contract file
   test-harness validate --service s1 --contract ./contracts/custom.yaml`,

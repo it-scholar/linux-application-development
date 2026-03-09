@@ -132,6 +132,8 @@ func (v *Validator) ValidateService(serviceName string, contractPath string) (*V
 func (v *Validator) checkBinary(serviceName string, contract *Contract) error {
 	// look for binary in common locations
 	paths := []string{
+		fmt.Sprintf("../../services/%s/%s", serviceName, serviceName),
+		fmt.Sprintf("../services/%s/%s", serviceName, serviceName),
 		fmt.Sprintf("./services/%s/%s", serviceName, serviceName),
 		fmt.Sprintf("./services/%s/ws-%s", serviceName, serviceName),
 		fmt.Sprintf("./%s", serviceName),
@@ -139,8 +141,9 @@ func (v *Validator) checkBinary(serviceName string, contract *Contract) error {
 	}
 
 	for _, path := range paths {
+		v.logger.Debug("searching for binary", "path", path)
 		if _, err := os.Stat(path); err == nil {
-			v.logger.Debug("found binary", "path", path)
+			v.logger.Info("found binary", "path", path)
 			return nil
 		}
 	}
@@ -184,11 +187,11 @@ func (v *Validator) checkPerformance(contract *Contract) error {
 func GetContractPath(serviceName string) string {
 	// map service names to contract files
 	contractMap := map[string]string{
-		"s1_ingestion":   "s1_contract.yaml",
-		"s2_aggregation": "s2_contract.yaml",
-		"s3_query":       "s3_contract.yaml",
-		"s4_discovery":   "s4_contract.yaml",
-		"c1_cli":         "c1_contract.yaml",
+		"ingestion":   "ingestion_contract.yaml",
+		"aggregation": "aggregation_contract.yaml",
+		"query":       "query_contract.yaml",
+		"discovery":   "discovery_contract.yaml",
+		"c1_cli":      "c1_contract.yaml",
 	}
 
 	filename, ok := contractMap[serviceName]

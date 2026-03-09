@@ -1,7 +1,7 @@
-# s1 ingestion service contract
+# ingestion service contract
 # defines what the ingestion service must do
 
-service: s1_ingestion
+service: ingestion
 version: "1.0"
 description: "high-performance csv file ingestion service"
 

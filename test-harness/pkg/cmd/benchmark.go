@@ -76,7 +76,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 	var err error
 
 	switch benchmarkFlags.target {
-	case "s1", "s1_ingestion", "ingest":
+	case "s1", "ingestion", "ingest":
 		result, err = runner.RunIngestBenchmark(ctx, target, cfg)
 	case "s3", "s3_api", "query":
 		result, err = runner.RunQueryBenchmark(ctx, target, cfg)

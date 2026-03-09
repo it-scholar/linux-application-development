@@ -31,7 +31,7 @@ func (s *tests1signalhandling) setup() {
 	os.MkdirAll(csvDir, 0755)
 
 	// start s1 service
-	s.StartService("s1_ingestion", services.ServiceConfig{
+	s.StartService("ingestion", services.ServiceConfig{
 		Binary: "./ws-ingest",
 		Config: "./config/s1_test.ini",
 		Daemon: true,
@@ -49,14 +49,14 @@ func TestS1SignalHandling_SIGTERM(t *testing.T) {
 	defer s.teardown()
 
 	// send sigterm
-	err := s.SvcManager.SendSignal("s1_ingestion", syscall.SIGTERM)
+	err := s.SvcManager.SendSignal("ingestion", syscall.SIGTERM)
 	testlib.NoError(t, err, "should send sigterm")
 
 	// wait for graceful shutdown
 	time.Sleep(2 * time.Second)
 
 	// check service stopped
-	svc, exists := s.SvcManager.GetService("s1_ingestion")
+	svc, exists := s.SvcManager.GetService("ingestion")
 	testlib.False(t, exists, "service should not exist after sigterm")
 
 	if exists {
@@ -71,14 +71,14 @@ func TestS1SignalHandling_SIGHUP(t *testing.T) {
 	defer s.teardown()
 
 	// send sighup
-	err := s.SvcManager.SendSignal("s1_ingestion", syscall.SIGHUP)
+	err := s.SvcManager.SendSignal("ingestion", syscall.SIGHUP)
 	testlib.NoError(t, err, "should send sighup")
 
 	// wait for config reload
 	time.Sleep(1 * time.Second)
 
 	// check service still running
-	svc, exists := s.SvcManager.GetService("s1_ingestion")
+	svc, exists := s.SvcManager.GetService("ingestion")
 	testlib.True(t, exists, "service should still exist after sighup")
 	testlib.True(t, svc.Health.Healthy, "service should still be healthy")
 }
@@ -102,7 +102,7 @@ func (s *tests1ingestion) setup() {
 	os.MkdirAll(s.csvDir, 0755)
 
 	// start s1
-	s.StartService("s1_ingestion", services.ServiceConfig{
+	s.StartService("ingestion", services.ServiceConfig{
 		Binary: "./ws-ingest",
 		Config: "./config/s1_test.ini",
 		Daemon: true,
@@ -182,7 +182,7 @@ invalid,timestamp,here`
 	time.Sleep(3 * time.Second)
 
 	// verify error handling (should not crash)
-	svc, exists := s.SvcManager.GetService("s1_ingestion")
+	svc, exists := s.SvcManager.GetService("ingestion")
 	testlib.True(t, exists, "service should still exist")
 	testlib.True(t, svc.Health.Healthy, "service should still be healthy")
 }

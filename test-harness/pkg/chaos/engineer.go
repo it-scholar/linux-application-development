@@ -127,7 +127,7 @@ func (e *Engineer) runLeaderFailover(ctx context.Context, duration time.Duration
 	e.logger.Info("starting leader failover test")
 
 	// Monitor for leader (for now, assume s1 is the data source)
-	leader := "s1_ingestion"
+	leader := "ingestion"
 
 	// Verify leader is healthy
 	healthy, err := sm.HealthCheck(leader)
@@ -160,7 +160,7 @@ func (e *Engineer) runLeaderFailover(ctx context.Context, duration time.Duration
 func (e *Engineer) runServiceKill(ctx context.Context, duration time.Duration, sm ServiceManager) error {
 	e.logger.Info("starting service kill test")
 
-	services := []string{"s1_ingestion", "s2_processor", "s3_api", "s4_cluster"}
+	services := []string{"ingestion", "s2_processor", "s3_api", "s4_cluster"}
 
 	endTime := time.Now().Add(duration)
 	for time.Now().Before(endTime) {
@@ -196,7 +196,7 @@ func (e *Engineer) runServiceKill(ctx context.Context, duration time.Duration, s
 func (e *Engineer) runCascadingFailure(ctx context.Context, duration time.Duration, sm ServiceManager) error {
 	e.logger.Info("starting cascading failure test")
 
-	services := []string{"s4_cluster", "s3_api", "s2_processor", "s1_ingestion"}
+	services := []string{"s4_cluster", "s3_api", "s2_processor", "ingestion"}
 
 	// Kill services in reverse order
 	for _, svc := range services {

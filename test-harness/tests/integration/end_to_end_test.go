@@ -35,7 +35,7 @@ func (s *testendtoendpipeline) setup() {
 	os.MkdirAll(s.csvDir, 0755)
 
 	// start all services
-	s.StartService("s1_ingestion", services.ServiceConfig{
+	s.StartService("ingestion", services.ServiceConfig{
 		Binary: "./ws-ingest",
 		Config: "./config/s1.ini",
 		Daemon: true,

@@ -15,7 +15,7 @@ data:
     parallel: 4
     fail_fast: false
     services:
-      s1_ingestion:
+      ingestion:
         binary: ./services/s1/ingestion
         config: ./services/s1/ingestion.ini
       s2_processor:

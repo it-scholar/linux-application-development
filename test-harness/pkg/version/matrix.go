@@ -275,9 +275,9 @@ func (t *APITest) Run(server Version, client Client) error {
 // DefaultVersions returns default service versions for testing
 func DefaultVersions() []Version {
 	return []Version{
-		{Name: "s1_ingestion", Major: 1, Minor: 0, Patch: 0},
-		{Name: "s1_ingestion", Major: 1, Minor: 1, Patch: 0},
-		{Name: "s1_ingestion", Major: 2, Minor: 0, Patch: 0},
+		{Name: "ingestion", Major: 1, Minor: 0, Patch: 0},
+		{Name: "ingestion", Major: 1, Minor: 1, Patch: 0},
+		{Name: "ingestion", Major: 2, Minor: 0, Patch: 0},
 		{Name: "s2_processor", Major: 1, Minor: 0, Patch: 0},
 		{Name: "s2_processor", Major: 1, Minor: 5, Patch: 0},
 		{Name: "s3_api", Major: 1, Minor: 0, Patch: 0},

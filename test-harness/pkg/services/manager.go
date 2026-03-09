@@ -228,19 +228,39 @@ func (m *Manager) findBinary(name string) string {
 		fmt.Sprintf("ws_%s", name),
 	}
 
-	// common paths to search
-	paths := []string{
-		"./services/%s/%s",
-		"./services/%s/bin/%s",
-		"./bin/%s",
-		"./%s",
-		"/usr/local/bin/%s",
+	// Search in various locations
+	searchPaths := []string{
+		fmt.Sprintf("../../services/%s/%s", name, name),
+		fmt.Sprintf("../services/%s/%s", name, name),
+		fmt.Sprintf("./services/%s/%s", name, name),
+		fmt.Sprintf("./services/%s/bin/%s", name, name),
+		fmt.Sprintf("./bin/%s", name),
+		fmt.Sprintf("./%s", name),
+		fmt.Sprintf("/usr/local/bin/%s", name),
 	}
 
-	for _, n := range names {
-		for _, p := range paths {
-			path := fmt.Sprintf(p, name, n)
+	for _, path := range searchPaths {
+		m.logger.Debug("searching for binary", "path", path)
+		if _, err := os.Stat(path); err == nil {
+			m.logger.Info("found binary", "path", path)
+			return path
+		}
+	}
+
+	// Try alternative names
+	for _, altName := range names[1:] {
+		altPaths := []string{
+			fmt.Sprintf("../services/%s/%s", name, altName),
+			fmt.Sprintf("./services/%s/%s", name, altName),
+			fmt.Sprintf("./services/%s/bin/%s", name, altName),
+			fmt.Sprintf("./bin/%s", altName),
+			fmt.Sprintf("./%s", altName),
+			fmt.Sprintf("/usr/local/bin/%s", altName),
+		}
+		for _, path := range altPaths {
+			m.logger.Debug("searching for binary (alt name)", "path", path)
 			if _, err := os.Stat(path); err == nil {
+				m.logger.Info("found binary", "path", path)
 				return path
 			}
 		}

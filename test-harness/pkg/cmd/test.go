@@ -29,7 +29,7 @@ examples:
   test-harness test
 
   # test specific service
-  test-harness test --service s1_ingestion
+  test-harness test --service ingestion
 
   # run with mocks for dependencies
   test-harness test --service s1 --use-mocks s3,s4
