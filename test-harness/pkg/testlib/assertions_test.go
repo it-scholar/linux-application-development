@@ -5,6 +5,34 @@ import (
 	"testing"
 )
 
+// mockT is a mock testing.T that captures errors without failing
+type mockT struct {
+	errors   []string
+	failed   bool
+	logs     []string
+	logfMsgs []string
+}
+
+func (m *mockT) Errorf(format string, args ...interface{}) {
+	m.errors = append(m.errors, format)
+}
+
+func (m *mockT) Fail() {
+	m.failed = true
+}
+
+func (m *mockT) Failed() bool {
+	return m.failed
+}
+
+func (m *mockT) Log(args ...interface{}) {
+	m.logs = append(m.logs, "log")
+}
+
+func (m *mockT) Logf(format string, args ...interface{}) {
+	m.logfMsgs = append(m.logfMsgs, format)
+}
+
 func TestEqual(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -20,7 +48,8 @@ func TestEqual(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Equal(t, tt.expected, tt.actual)
+			mock := &mockT{}
+			result := Equal(mock, tt.expected, tt.actual)
 			if result != tt.wantPass {
 				t.Errorf("Equal(%v, %v) = %v, want %v",
 					tt.expected, tt.actual, result, tt.wantPass)
@@ -42,7 +71,8 @@ func TestNotEqual(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := NotEqual(t, tt.expected, tt.actual)
+			mock := &mockT{}
+			result := NotEqual(mock, tt.expected, tt.actual)
 			if result != tt.wantPass {
 				t.Errorf("NotEqual(%v, %v) = %v, want %v",
 					tt.expected, tt.actual, result, tt.wantPass)
@@ -63,7 +93,8 @@ func TestTrue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := True(t, tt.value)
+			mock := &mockT{}
+			result := True(mock, tt.value)
 			if result != tt.wantPass {
 				t.Errorf("True(%v) = %v, want %v", tt.value, result, tt.wantPass)
 			}
@@ -83,7 +114,8 @@ func TestFalse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := False(t, tt.value)
+			mock := &mockT{}
+			result := False(mock, tt.value)
 			if result != tt.wantPass {
 				t.Errorf("False(%v) = %v, want %v", tt.value, result, tt.wantPass)
 			}
@@ -103,7 +135,8 @@ func TestNil(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Nil(t, tt.value)
+			mock := &mockT{}
+			result := Nil(mock, tt.value)
 			if result != tt.wantPass {
 				t.Errorf("Nil(%v) = %v, want %v", tt.value, result, tt.wantPass)
 			}
@@ -123,7 +156,8 @@ func TestNotNil(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := NotNil(t, tt.value)
+			mock := &mockT{}
+			result := NotNil(mock, tt.value)
 			if result != tt.wantPass {
 				t.Errorf("NotNil(%v) = %v, want %v", tt.value, result, tt.wantPass)
 			}
@@ -143,7 +177,8 @@ func TestNoError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := NoError(t, tt.err)
+			mock := &mockT{}
+			result := NoError(mock, tt.err)
 			if result != tt.wantPass {
 				t.Errorf("NoError(%v) = %v, want %v", tt.err, result, tt.wantPass)
 			}
@@ -163,7 +198,8 @@ func TestError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Error(t, tt.err)
+			mock := &mockT{}
+			result := Error(mock, tt.err)
 			if result != tt.wantPass {
 				t.Errorf("Error(%v) = %v, want %v", tt.err, result, tt.wantPass)
 			}
@@ -186,7 +222,8 @@ func TestContains(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Contains(t, tt.s, tt.substr)
+			mock := &mockT{}
+			result := Contains(mock, tt.s, tt.substr)
 			if result != tt.wantPass {
 				t.Errorf("Contains(%q, %q) = %v, want %v",
 					tt.s, tt.substr, result, tt.wantPass)
@@ -209,7 +246,8 @@ func TestGreater(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Greater(t, tt.a, tt.b)
+			mock := &mockT{}
+			result := Greater(mock, tt.a, tt.b)
 			if result != tt.wantPass {
 				t.Errorf("Greater(%d, %d) = %v, want %v",
 					tt.a, tt.b, result, tt.wantPass)
@@ -232,7 +270,8 @@ func TestLess(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Less(t, tt.a, tt.b)
+			mock := &mockT{}
+			result := Less(mock, tt.a, tt.b)
 			if result != tt.wantPass {
 				t.Errorf("Less(%d, %d) = %v, want %v",
 					tt.a, tt.b, result, tt.wantPass)
@@ -255,7 +294,8 @@ func TestErrorContains(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ErrorContains(t, tt.err, tt.substr)
+			mock := &mockT{}
+			result := ErrorContains(mock, tt.err, tt.substr)
 			if result != tt.wantPass {
 				t.Errorf("ErrorContains(%v, %q) = %v, want %v",
 					tt.err, tt.substr, result, tt.wantPass)
@@ -278,7 +318,8 @@ func TestHasPrefix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := HasPrefix(t, tt.s, tt.prefix)
+			mock := &mockT{}
+			result := HasPrefix(mock, tt.s, tt.prefix)
 			if result != tt.wantPass {
 				t.Errorf("HasPrefix(%q, %q) = %v, want %v",
 					tt.s, tt.prefix, result, tt.wantPass)
@@ -301,7 +342,8 @@ func TestHasSuffix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := HasSuffix(t, tt.s, tt.suffix)
+			mock := &mockT{}
+			result := HasSuffix(mock, tt.s, tt.suffix)
 			if result != tt.wantPass {
 				t.Errorf("HasSuffix(%q, %q) = %v, want %v",
 					tt.s, tt.suffix, result, tt.wantPass)
