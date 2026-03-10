@@ -139,24 +139,87 @@ jobs:
         path: test-harness/bin/test-harness
 
   docker:
-    name: Docker Build
+    name: Docker Build and Push
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
     steps:
     - uses: actions/checkout@v4
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build Docker image
-      working-directory: test-harness
-      run: |
-        docker build -t weather-station-test:latest .
-        docker images
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository_owner }}/weather-station-test-harness
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix=,suffix=,format=short
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: test-harness
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
 
     - name: Test Docker image
+      run: |
+        docker run --rm ghcr.io/${{ github.repository_owner }}/weather-station-test-harness:${{ github.sha }} --help
+        docker run --rm ghcr.io/${{ github.repository_owner }}/weather-station-test-harness:${{ github.sha }} validate --help
+
+  release-binary:
+    name: Release Binary
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Download dependencies
+      working-directory: test-harness
+      run: go mod download
+
+    - name: Build release binaries
       working-directory: test-harness
       run: |
-        docker run --rm weather-station-test:latest --help
-        docker run --rm weather-station-test:latest validate --help
+        # Build for multiple platforms
+        GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o bin/test-harness-linux-amd64 ./cmd/harness
+        GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o bin/test-harness-linux-arm64 ./cmd/harness
+        GOOS=darwin GOARCH=amd64 go build -ldflags="-w -s" -o bin/test-harness-darwin-amd64 ./cmd/harness
+        GOOS=darwin GOARCH=arm64 go build -ldflags="-w -s" -o bin/test-harness-darwin-arm64 ./cmd/harness
+        GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o bin/test-harness-windows-amd64.exe ./cmd/harness
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: test-harness/bin/*
+        generate_release_notes: true
