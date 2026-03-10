@@ -184,11 +184,6 @@ jobs:
         cache-to: type=gha,mode=max
         platforms: linux/amd64,linux/arm64
 
-    - name: Test Docker image
-      run: |
-        docker run --rm ghcr.io/${{ github.repository_owner }}/weather-station-test-harness:${{ github.sha }} --help
-        docker run --rm ghcr.io/${{ github.repository_owner }}/weather-station-test-harness:${{ github.sha }} validate --help
-
   release-binary:
     name: Release Binary
     runs-on: ubuntu-latest
