@@ -13,11 +13,11 @@ RUN apk add --no-cache \
 WORKDIR /build
 
 # Copy Go module files first for better caching
-COPY test-harness/go.mod test-harness/go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy test harness source
-COPY test-harness/ .
+COPY . .
 
 # Build
 RUN make build
