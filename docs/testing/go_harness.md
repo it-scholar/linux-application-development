@@ -303,7 +303,9 @@ flags:
       --format string      output format (csv|json)
       --parallel int       parallel downloads (default 4)
       --cache              use local cache
-      --cache-dir string   cache directory (default ~/.cache/ws-test/noaa)
+      --cache-dir string       cache directory (default ~/.cache/ws-test/noaa)
+      --rate-limit float       requests per second (default 1.0, 0 = unlimited)
+      --min-free-space float   minimum free space in GB before stopping (default 1.0)
 
 data sources:
   - noaa ghcn-daily: global historical climatology network daily
@@ -325,6 +327,9 @@ examples:
 
   # get small dataset for testing (5 stations, 1 year)
   test-harness retrieve --limit 10000 --start 2024-01-01 --end 2024-12-31
+
+  # overnight loading with rate limiting and disk space protection
+  test-harness retrieve --country us --limit 100000 --rate-limit 0.5 --min-free-space 5.0 --cache
 
 output format:
   csv columns: station_id, date, temperature_max, temperature_min, 
