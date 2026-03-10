@@ -39,9 +39,6 @@ RUN addgroup -g 1000 weather && \
 # Copy binary from builder
 COPY --from=builder /build/bin/test-harness /usr/local/bin/test-harness
 
-# Copy config files
-COPY --from=builder /build/config/ /etc/weather-station/
-
 # Copy test files
 COPY --from=builder /build/tests/ /opt/weather-station/tests/
 
