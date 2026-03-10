@@ -10,8 +10,14 @@
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
-#include <ctype.h>
-#include <stdarg.h>
+#include <netdb.h>
+#include <sys/time.h>
+
+/* Shared library headers */
+#include "common.h"
+#include "logging.h"
+#include "config.h"
+#include "daemon.h"
 
 #define VERSION "1.0.0"
 #define DEFAULT_CONFIG_FILE "discovery.ini"
@@ -25,7 +31,7 @@ typedef enum {
     NODE_STATE_FOLLOWER = 0,
     NODE_STATE_CANDIDATE,
     NODE_STATE_LEADER
-} NodeState;
+} NodeStateEnum;
 
 /* Node information */
 typedef struct {
@@ -37,43 +43,42 @@ typedef struct {
     int is_leader;
 } NodeInfo;
 
+/* Peer endpoint configuration for cross-namespace/cross-cluster communication */
+typedef struct {
+    char fqdn[256];          /* FQDN or IP address */
+    int port;                /* TCP port */
+    char node_id[MAX_NODE_ID_LEN]; /* Optional node ID */
+    int use_tcp;             /* Use TCP instead of UDP for this peer */
+} PeerEndpoint;
+
 /* Configuration structure */
 typedef struct {
     char node_id[MAX_NODE_ID_LEN];
     char bind_address[64];
     int discovery_port;
-    char log_file[256];
-    int log_level;
-    int daemon_mode;
     int election_timeout_ms;
     int heartbeat_interval_ms;
+    int tcp_health_port;     /* TCP port for health checks */
     NodeInfo known_nodes[MAX_NODES];
     int known_node_count;
-} Config;
+    PeerEndpoint peer_endpoints[MAX_NODES]; /* FQDN-based peer endpoints */
+    int peer_endpoint_count;
+} DiscoveryConfig;
 
 /* Global state */
 typedef struct {
-    Config config;
-    volatile int running;
-    volatile int reload_config;
+    DiscoveryConfig config;
     int udp_socket;
-    NodeState state;
+    NodeStateEnum node_state;
     time_t last_election;
     time_t last_heartbeat;
     NodeInfo cluster_nodes[MAX_NODES];
     int node_count;
-    FILE *log_fp;
-} State;
+    Logger logger;
+    DaemonState daemon;
+} DiscoveryState;
 
-static State g_state = {0};
-
-/* Log levels */
-enum {
-    LOG_DEBUG = 0,
-    LOG_INFO,
-    LOG_WARN,
-    LOG_ERROR
-};
+static DiscoveryState g_state = {0};
 
 /* Message types */
 #define MSG_DISCOVER "DISCOVER"
@@ -81,9 +86,8 @@ enum {
 #define MSG_ELECTION "ELECTION"
 #define MSG_COORDINATOR "COORDINATOR"
 
-/* Function prototypes */
-static void log_message(int level, const char *format, ...);
-static int parse_config(const char *filename, Config *config);
+/* Forward declarations */
+static int parse_config_handler(const char *key, const char *value, void *user_data);
 static int init_udp_socket(void);
 static void send_discovery_message(void);
 static void send_heartbeat(void);
@@ -92,119 +96,86 @@ static void start_election(void);
 static void handle_election_message(const char *sender_id);
 static void handle_coordinator_message(const char *leader_id);
 static void check_leader_health(void);
-static void signal_handler(int sig);
 static void cleanup(void);
-static int write_pid_file(const char *pid_file);
-static void remove_pid_file(const char *pid_file);
 
-/* Logging function */
-static void log_message(int level, const char *format, ...) {
-    if (level < g_state.config.log_level) return;
+/* Configuration handler callback */
+static int parse_config_handler(const char *key, const char *value, void *user_data) {
+    DiscoveryConfig *config = (DiscoveryConfig *)user_data;
+    int log_level;
+    char log_file[256];
+    int daemon_mode;
     
-    const char *level_str[] = {"DEBUG", "INFO", "WARN", "ERROR"};
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char timestamp[26];
-    strftime(timestamp, 26, "%Y-%m-%d %H:%M:%S", tm_info);
-    
-    FILE *output = g_state.log_fp ? g_state.log_fp : stdout;
-    
-    fprintf(output, "[%s] [%s] ", timestamp, level_str[level]);
-    
-    va_list args;
-    va_start(args, format);
-    vfprintf(output, format, args);
-    va_end(args);
-    
-    fprintf(output, "\n");
-    fflush(output);
-}
-
-/* Parse configuration file */
-static int parse_config(const char *filename, Config *config) {
-    FILE *fp = fopen(filename, "r");
-    if (!fp) {
-        log_message(LOG_ERROR, "Cannot open config file: %s", filename);
-        return -1;
+    /* Handle common configuration keys */
+    if (config_handle_common(key, value, &log_level, log_file, sizeof(log_file), &daemon_mode)) {
+        if (strcmp(key, "log_level") == 0) {
+            g_state.logger.level = (LogLevel)log_level;
+        }
+        return 0;
     }
     
-    char line[BUFFER_SIZE];
-    while (fgets(line, sizeof(line), fp)) {
-        char *comment = strchr(line, '#');
-        if (comment) *comment = '\0';
-        
-        int len = strlen(line);
-        while (len > 0 && isspace(line[len-1])) {
-            line[--len] = '\0';
+    /* Handle discovery-specific keys */
+    if (strcmp(key, "node_id") == 0) {
+        SAFE_STRCPY(config->node_id, value, sizeof(config->node_id));
+    } else if (strcmp(key, "bind_address") == 0) {
+        SAFE_STRCPY(config->bind_address, value, sizeof(config->bind_address));
+    } else if (strcmp(key, "discovery_port") == 0) {
+        config->discovery_port = atoi(value);
+    } else if (strcmp(key, "election_timeout_ms") == 0) {
+        config->election_timeout_ms = atoi(value);
+    } else if (strcmp(key, "heartbeat_interval_ms") == 0) {
+        config->heartbeat_interval_ms = atoi(value);
+    } else if (strcmp(key, "cluster_node") == 0 && config->known_node_count < MAX_NODES) {
+        /* Parse node format: id:address:port */
+        char *colon1 = strchr(value, ':');
+        char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
+        if (colon1 && colon2) {
+            *colon1 = '\0';
+            *colon2 = '\0';
+            SAFE_STRCPY(config->known_nodes[config->known_node_count].id, value, MAX_NODE_ID_LEN);
+            SAFE_STRCPY(config->known_nodes[config->known_node_count].address, colon1 + 1, 64);
+            config->known_nodes[config->known_node_count].port = atoi(colon2 + 1);
+            config->known_node_count++;
         }
-        
-        if (len == 0) continue;
-        
-        char *key = line;
-        char *equals = strchr(line, '=');
-        if (!equals) continue;
-        
-        *equals = '\0';
-        char *value = equals + 1;
-        
-        while (isspace(*key)) key++;
-        while (isspace(*value)) value++;
-        while (len > 0 && isspace(key[len-1])) key[--len] = '\0';
-        
-        if (strcmp(key, "node_id") == 0) {
-            strncpy(config->node_id, value, sizeof(config->node_id) - 1);
-        } else if (strcmp(key, "bind_address") == 0) {
-            strncpy(config->bind_address, value, sizeof(config->bind_address) - 1);
-        } else if (strcmp(key, "discovery_port") == 0) {
-            config->discovery_port = atoi(value);
-        } else if (strcmp(key, "log_file") == 0) {
-            strncpy(config->log_file, value, sizeof(config->log_file) - 1);
-        } else if (strcmp(key, "log_level") == 0) {
-            if (strcmp(value, "debug") == 0) config->log_level = LOG_DEBUG;
-            else if (strcmp(value, "info") == 0) config->log_level = LOG_INFO;
-            else if (strcmp(value, "warn") == 0) config->log_level = LOG_WARN;
-            else if (strcmp(value, "error") == 0) config->log_level = LOG_ERROR;
-        } else if (strcmp(key, "daemon_mode") == 0) {
-            config->daemon_mode = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
-        } else if (strcmp(key, "election_timeout_ms") == 0) {
-            config->election_timeout_ms = atoi(value);
-        } else if (strcmp(key, "heartbeat_interval_ms") == 0) {
-            config->heartbeat_interval_ms = atoi(value);
-        } else if (strcmp(key, "cluster_node") == 0 && config->known_node_count < MAX_NODES) {
-            /* Parse node format: id:address:port */
-            char *colon1 = strchr(value, ':');
-            char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
-            if (colon1 && colon2) {
-                *colon1 = '\0';
+    } else if (strcmp(key, "peer_endpoint") == 0 && config->peer_endpoint_count < MAX_NODES) {
+        /* Parse peer endpoint format: fqdn:port[:node_id] */
+        /* Examples:
+         *   peer_endpoint = weather-station-2-query.station2.svc.cluster.local:8080
+         *   peer_endpoint = weather-station-2-query.station2.svc.cluster.local:8080:station2
+         */
+        char *colon1 = strchr(value, ':');
+        if (colon1) {
+            *colon1 = '\0';
+            char *colon2 = strchr(colon1 + 1, ':');
+            char *node_id = NULL;
+            
+            if (colon2) {
                 *colon2 = '\0';
-                strncpy(config->known_nodes[config->known_node_count].id, value, MAX_NODE_ID_LEN - 1);
-                strncpy(config->known_nodes[config->known_node_count].address, colon1 + 1, 63);
-                config->known_nodes[config->known_node_count].port = atoi(colon2 + 1);
-                config->known_node_count++;
+                node_id = colon2 + 1;
             }
+            
+            SAFE_STRCPY(config->peer_endpoints[config->peer_endpoint_count].fqdn, value, 256);
+            config->peer_endpoints[config->peer_endpoint_count].port = atoi(colon1 + 1);
+            config->peer_endpoints[config->peer_endpoint_count].use_tcp = 1;
+            
+            if (node_id && strlen(node_id) > 0) {
+                SAFE_STRCPY(config->peer_endpoints[config->peer_endpoint_count].node_id, node_id, MAX_NODE_ID_LEN);
+            } else {
+                /* Generate node_id from FQDN if not provided */
+                snprintf(config->peer_endpoints[config->peer_endpoint_count].node_id, MAX_NODE_ID_LEN,
+                        "peer-%d", config->peer_endpoint_count);
+            }
+            
+            config->peer_endpoint_count++;
+            LOG_INFO(&g_state.logger, "Added peer endpoint: %s:%d (%s)",
+                    value, atoi(colon1 + 1),
+                    config->peer_endpoints[config->peer_endpoint_count - 1].node_id);
         }
+    } else if (strcmp(key, "tcp_health_port") == 0) {
+        config->tcp_health_port = atoi(value);
+    } else {
+        LOG_WARN(&g_state.logger, "Unknown config key: %s", key);
     }
     
-    fclose(fp);
-    
-    /* Set defaults */
-    if (config->node_id[0] == '\0') {
-        snprintf(config->node_id, sizeof(config->node_id), "node-%d", getpid());
-    }
-    if (config->bind_address[0] == '\0') {
-        strcpy(config->bind_address, "0.0.0.0");
-    }
-    if (config->discovery_port == 0) {
-        config->discovery_port = 9000;
-    }
-    if (config->election_timeout_ms == 0) {
-        config->election_timeout_ms = 5000;
-    }
-    if (config->heartbeat_interval_ms == 0) {
-        config->heartbeat_interval_ms = 1000;
-    }
-    
-    log_message(LOG_INFO, "Configuration loaded from %s", filename);
     return 0;
 }
 
@@ -212,14 +183,14 @@ static int parse_config(const char *filename, Config *config) {
 static int init_udp_socket(void) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
-        log_message(LOG_ERROR, "Failed to create UDP socket: %s", strerror(errno));
+        LOG_ERROR(&g_state.logger, "Failed to create UDP socket: %s", strerror(errno));
         return -1;
     }
     
     /* Allow socket reuse */
     int opt = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        log_message(LOG_ERROR, "Failed to set socket options: %s", strerror(errno));
+        LOG_ERROR(&g_state.logger, "Failed to set socket options: %s", strerror(errno));
         close(sock);
         return -1;
     }
@@ -231,7 +202,7 @@ static int init_udp_socket(void) {
     address.sin_port = htons(g_state.config.discovery_port);
     
     if (bind(sock, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        log_message(LOG_ERROR, "Failed to bind to %s:%d: %s",
+        LOG_ERROR(&g_state.logger, "Failed to bind to %s:%d: %s",
                    g_state.config.bind_address, g_state.config.discovery_port, strerror(errno));
         close(sock);
         return -1;
@@ -243,7 +214,7 @@ static int init_udp_socket(void) {
     
     g_state.udp_socket = sock;
     
-    log_message(LOG_INFO, "UDP socket listening on %s:%d",
+    LOG_INFO(&g_state.logger, "UDP socket listening on %s:%d",
                g_state.config.bind_address, g_state.config.discovery_port);
     
     return 0;
@@ -272,13 +243,13 @@ static void send_discovery_message(void) {
                (struct sockaddr *)&addr, sizeof(addr));
     }
     
-    log_message(LOG_DEBUG, "Sent discovery message");
+    LOG_DEBUG(&g_state.logger, "Sent discovery message");
 }
 
 /* Send heartbeat */
 static void send_heartbeat(void) {
     char msg[256];
-    int is_leader = (g_state.state == NODE_STATE_LEADER) ? 1 : 0;
+    int is_leader = (g_state.node_state == NODE_STATE_LEADER) ? 1 : 0;
     snprintf(msg, sizeof(msg), "%s:%s:%d", MSG_HEARTBEAT, g_state.config.node_id, is_leader);
     
     struct sockaddr_in addr;
@@ -307,7 +278,7 @@ static void handle_discovery_message(const char *msg, struct sockaddr_in *from) 
     /* Don't process our own messages */
     if (strcmp(node_id, g_state.config.node_id) == 0) return;
     
-    log_message(LOG_DEBUG, "Received discovery from %s", node_id);
+    LOG_DEBUG(&g_state.logger, "Received discovery from %s", node_id);
     
     /* Add or update node */
     int found = 0;
@@ -321,22 +292,22 @@ static void handle_discovery_message(const char *msg, struct sockaddr_in *from) 
     }
     
     if (!found && g_state.node_count < MAX_NODES) {
-        strncpy(g_state.cluster_nodes[g_state.node_count].id, node_id, MAX_NODE_ID_LEN - 1);
-        strncpy(g_state.cluster_nodes[g_state.node_count].address, 
-                inet_ntoa(from->sin_addr), 63);
+        SAFE_STRCPY(g_state.cluster_nodes[g_state.node_count].id, node_id, MAX_NODE_ID_LEN);
+        SAFE_STRCPY(g_state.cluster_nodes[g_state.node_count].address, 
+                inet_ntoa(from->sin_addr), 64);
         g_state.cluster_nodes[g_state.node_count].port = ntohs(from->sin_port);
         g_state.cluster_nodes[g_state.node_count].last_seen = time(NULL);
         g_state.cluster_nodes[g_state.node_count].is_healthy = 1;
         g_state.node_count++;
-        log_message(LOG_INFO, "New node discovered: %s", node_id);
+        LOG_INFO(&g_state.logger, "New node discovered: %s", node_id);
     }
 }
 
 /* Start leader election (Bully algorithm) */
 static void start_election(void) {
-    log_message(LOG_INFO, "Starting leader election");
+    LOG_INFO(&g_state.logger, "Starting leader election");
     
-    g_state.state = NODE_STATE_CANDIDATE;
+    g_state.node_state = NODE_STATE_CANDIDATE;
     g_state.last_election = time(NULL);
     
     /* Send election message to nodes with higher IDs */
@@ -361,8 +332,8 @@ static void start_election(void) {
     
     /* If no higher nodes, become leader */
     if (higher_nodes == 0) {
-        g_state.state = NODE_STATE_LEADER;
-        log_message(LOG_INFO, "No higher nodes found, becoming leader");
+        g_state.node_state = NODE_STATE_LEADER;
+        LOG_INFO(&g_state.logger, "No higher nodes found, becoming leader");
         
         /* Announce leadership */
         snprintf(msg, sizeof(msg), "%s:%s", MSG_COORDINATOR, g_state.config.node_id);
@@ -374,23 +345,23 @@ static void start_election(void) {
 
 /* Handle election message */
 static void handle_election_message(const char *sender_id) {
-    log_message(LOG_DEBUG, "Received election message from %s", sender_id);
+    LOG_DEBUG(&g_state.logger, "Received election message from %s", sender_id);
     
     /* If we have higher ID, respond and start our own election */
     if (strcmp(g_state.config.node_id, sender_id) > 0) {
-        log_message(LOG_INFO, "Higher ID than %s, starting election", sender_id);
+        LOG_INFO(&g_state.logger, "Higher ID than %s, starting election", sender_id);
         start_election();
     }
 }
 
 /* Handle coordinator message */
 static void handle_coordinator_message(const char *leader_id) {
-    log_message(LOG_INFO, "New leader elected: %s", leader_id);
+    LOG_INFO(&g_state.logger, "New leader elected: %s", leader_id);
     
     if (strcmp(leader_id, g_state.config.node_id) == 0) {
-        g_state.state = NODE_STATE_LEADER;
+        g_state.node_state = NODE_STATE_LEADER;
     } else {
-        g_state.state = NODE_STATE_FOLLOWER;
+        g_state.node_state = NODE_STATE_FOLLOWER;
         
         /* Update leader in node list */
         for (int i = 0; i < g_state.node_count; i++) {
@@ -405,7 +376,7 @@ static void handle_coordinator_message(const char *leader_id) {
 
 /* Check leader health */
 static void check_leader_health(void) {
-    if (g_state.state == NODE_STATE_LEADER) return;
+    if (g_state.node_state == NODE_STATE_LEADER) return;
     
     /* Find current leader */
     time_t now = time(NULL);
@@ -416,7 +387,7 @@ static void check_leader_health(void) {
             leader_found = 1;
             if (now - g_state.cluster_nodes[i].last_seen > 
                 g_state.config.election_timeout_ms / 1000) {
-                log_message(LOG_WARN, "Leader %s is unresponsive, starting election",
+                LOG_WARN(&g_state.logger, "Leader %s is unresponsive, starting election",
                           g_state.cluster_nodes[i].id);
                 start_election();
             }
@@ -426,73 +397,168 @@ static void check_leader_health(void) {
     
     /* If no leader found, start election */
     if (!leader_found && g_state.node_count > 0) {
-        log_message(LOG_INFO, "No leader found, starting election");
+        LOG_INFO(&g_state.logger, "No leader found, starting election");
         start_election();
     }
 }
 
-/* Signal handler */
-static void signal_handler(int sig) {
-    switch (sig) {
-        case SIGTERM:
-        case SIGINT:
-            log_message(LOG_INFO, "Received signal %d, shutting down...", sig);
-            g_state.running = 0;
-            break;
-        case SIGHUP:
-            log_message(LOG_INFO, "Received SIGHUP, reloading configuration...");
-            g_state.reload_config = 1;
-            break;
+/* Resolve FQDN to IP address */
+static int resolve_fqdn(const char *fqdn, char *ip_buffer, size_t buffer_size) {
+    struct addrinfo hints, *res;
+    int err;
+    
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET; /* IPv4 only for simplicity */
+    hints.ai_socktype = SOCK_STREAM;
+    
+    err = getaddrinfo(fqdn, NULL, &hints, &res);
+    if (err != 0) {
+        LOG_WARN(&g_state.logger, "Failed to resolve %s: %s", fqdn, gai_strerror(err));
+        return -1;
+    }
+    
+    struct sockaddr_in *addr = (struct sockaddr_in *)res->ai_addr;
+    strncpy(ip_buffer, inet_ntoa(addr->sin_addr), buffer_size - 1);
+    ip_buffer[buffer_size - 1] = '\0';
+    
+    freeaddrinfo(res);
+    return 0;
+}
+
+/* Check TCP health of a peer endpoint */
+static int check_tcp_health(const char *fqdn, int port) {
+    char ip[64];
+    if (resolve_fqdn(fqdn, ip, sizeof(ip)) != 0) {
+        return -1;
+    }
+    
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+    
+    /* Set timeout */
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr(ip);
+    
+    int result = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    close(sock);
+    
+    return (result == 0) ? 0 : -1;
+}
+
+/* Check health of configured peer endpoints */
+static void check_peer_endpoints(void) {
+    for (int i = 0; i < g_state.config.peer_endpoint_count; i++) {
+        PeerEndpoint *peer = &g_state.config.peer_endpoints[i];
+        int is_healthy = (check_tcp_health(peer->fqdn, peer->port) == 0);
+        
+        /* Check if we already know about this peer */
+        int found = 0;
+        for (int j = 0; j < g_state.node_count; j++) {
+            if (strcmp(g_state.cluster_nodes[j].id, peer->node_id) == 0) {
+                if (is_healthy) {
+                    g_state.cluster_nodes[j].last_seen = time(NULL);
+                    g_state.cluster_nodes[j].is_healthy = 1;
+                } else {
+                    g_state.cluster_nodes[j].is_healthy = 0;
+                    LOG_WARN(&g_state.logger, "Peer %s (%s:%d) is unhealthy",
+                            peer->node_id, peer->fqdn, peer->port);
+                }
+                found = 1;
+                break;
+            }
+        }
+        
+        /* Add new peer if healthy */
+        if (!found && is_healthy && g_state.node_count < MAX_NODES) {
+            char ip[64];
+            if (resolve_fqdn(peer->fqdn, ip, sizeof(ip)) == 0) {
+                SAFE_STRCPY(g_state.cluster_nodes[g_state.node_count].id, peer->node_id, MAX_NODE_ID_LEN);
+                SAFE_STRCPY(g_state.cluster_nodes[g_state.node_count].address, ip, 64);
+                g_state.cluster_nodes[g_state.node_count].port = peer->port;
+                g_state.cluster_nodes[g_state.node_count].last_seen = time(NULL);
+                g_state.cluster_nodes[g_state.node_count].is_healthy = 1;
+                g_state.cluster_nodes[g_state.node_count].is_leader = 0;
+                g_state.node_count++;
+                LOG_INFO(&g_state.logger, "Discovered peer via FQDN: %s (%s:%d)",
+                        peer->node_id, peer->fqdn, peer->port);
+            }
+        }
+    }
+}
+
+/* Send heartbeat to peer endpoints via TCP */
+static void send_tcp_heartbeat_to_peers(void) {
+    for (int i = 0; i < g_state.config.peer_endpoint_count; i++) {
+        PeerEndpoint *peer = &g_state.config.peer_endpoints[i];
+        
+        char ip[64];
+        if (resolve_fqdn(peer->fqdn, ip, sizeof(ip)) != 0) {
+            continue;
+        }
+        
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) continue;
+        
+        /* Set short timeout */
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(peer->port);
+        addr.sin_addr.s_addr = inet_addr(ip);
+        
+        if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            /* Send simple heartbeat message */
+            char msg[256];
+            int is_leader = (g_state.node_state == NODE_STATE_LEADER) ? 1 : 0;
+            snprintf(msg, sizeof(msg), "HEARTBEAT:%s:%d", g_state.config.node_id, is_leader);
+            send(sock, msg, strlen(msg), 0);
+        }
+        
+        close(sock);
     }
 }
 
 /* Cleanup function */
 static void cleanup(void) {
-    log_message(LOG_INFO, "Cleaning up...");
+    LOG_INFO(&g_state.logger, "Cleaning up...");
     
     if (g_state.udp_socket > 0) {
         close(g_state.udp_socket);
         g_state.udp_socket = -1;
     }
     
-    if (g_state.log_fp && g_state.log_fp != stdout) {
-        fclose(g_state.log_fp);
-        g_state.log_fp = NULL;
-    }
-    
-    remove_pid_file(DEFAULT_PID_FILE);
-}
-
-/* Write PID file */
-static int write_pid_file(const char *pid_file) {
-    FILE *fp = fopen(pid_file, "w");
-    if (!fp) {
-        log_message(LOG_ERROR, "Cannot write PID file: %s", pid_file);
-        return -1;
-    }
-    
-    fprintf(fp, "%d\n", getpid());
-    fclose(fp);
-    
-    return 0;
-}
-
-/* Remove PID file */
-static void remove_pid_file(const char *pid_file) {
-    unlink(pid_file);
+    daemon_cleanup(&g_state.daemon);
+    logger_close(&g_state.logger);
 }
 
 /* Main function */
-int main(int argc, char *argv[]) {
+int main(int argc, char *const argv[]) {
     const char *config_file = DEFAULT_CONFIG_FILE;
     int validate_only = 0;
+    int daemon_mode = 0;
     
     /* Parse command line arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_file = argv[++i];
         } else if (strcmp(argv[i], "--daemon") == 0) {
-            g_state.config.daemon_mode = 1;
+            daemon_mode = 1;
         } else if (strcmp(argv[i], "--validate") == 0) {
             validate_only = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -507,8 +573,18 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    /* Initialize logger */
+    logger_init(&g_state.logger, "discovery", LOG_LEVEL_INFO, NULL);
+    
+    /* Set default configuration */
+    snprintf(g_state.config.node_id, sizeof(g_state.config.node_id), "node-%d", getpid());
+    strcpy(g_state.config.bind_address, "0.0.0.0");
+    g_state.config.discovery_port = 9000;
+    g_state.config.election_timeout_ms = 5000;
+    g_state.config.heartbeat_interval_ms = 1000;
+    
     /* Parse configuration */
-    if (parse_config(config_file, &g_state.config) != 0) {
+    if (config_parse(config_file, parse_config_handler, &g_state.config) < 0) {
         fprintf(stderr, "Failed to parse configuration\n");
         return 1;
     }
@@ -523,43 +599,18 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     
-    /* Open log file if specified */
-    if (g_state.config.log_file[0] != '\0') {
-        g_state.log_fp = fopen(g_state.config.log_file, "a");
-        if (!g_state.log_fp) {
-            fprintf(stderr, "Cannot open log file: %s\n", g_state.config.log_file);
-            g_state.log_fp = stdout;
-        }
-    }
-    
     /* Daemon mode */
-    if (g_state.config.daemon_mode) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            log_message(LOG_ERROR, "Fork failed");
-            return 1;
-        }
-        if (pid > 0) {
+    if (daemon_mode) {
+        if (daemon_fork() != 0) {
             return 0;
         }
-        
-        setsid();
-        chdir("/");
-        
-        freopen("/dev/null", "r", stdin);
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
     }
     
-    /* Write PID file */
-    if (write_pid_file(DEFAULT_PID_FILE) != 0) {
-        return 1;
-    }
+    /* Initialize daemon state */
+    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, cleanup);
     
     /* Setup signal handlers */
-    signal(SIGTERM, signal_handler);
-    signal(SIGINT, signal_handler);
-    signal(SIGHUP, signal_handler);
+    daemon_setup_signals(&g_state.daemon);
     
     /* Initialize UDP socket */
     if (init_udp_socket() != 0) {
@@ -568,11 +619,13 @@ int main(int argc, char *argv[]) {
     }
     
     /* Initialize state */
-    g_state.state = NODE_STATE_FOLLOWER;
-    g_state.running = 1;
+    g_state.node_state = NODE_STATE_FOLLOWER;
     
-    log_message(LOG_INFO, "Discovery Service v%s started", VERSION);
-    log_message(LOG_INFO, "Node ID: %s", g_state.config.node_id);
+    LOG_INFO(&g_state.logger, "Discovery Service v%s started", VERSION);
+    LOG_INFO(&g_state.logger, "Node ID: %s", g_state.config.node_id);
+    
+    /* Write PID file for health checks */
+    daemon_write_pid_file(DEFAULT_PID_FILE);
     
     /* Send initial discovery */
     send_discovery_message();
@@ -581,12 +634,11 @@ int main(int argc, char *argv[]) {
     time_t last_discovery = time(NULL);
     time_t last_health_check = time(NULL);
     
-    while (g_state.running) {
+    while (!daemon_should_stop(&g_state.daemon)) {
         /* Check for config reload */
-        if (g_state.reload_config) {
-            g_state.reload_config = 0;
-            log_message(LOG_INFO, "Reloading configuration...");
-            parse_config(config_file, &g_state.config);
+        if (daemon_should_reload(&g_state.daemon)) {
+            LOG_INFO(&g_state.logger, "Reloading configuration...");
+            config_parse(config_file, parse_config_handler, &g_state.config);
         }
         
         /* Receive and process messages */
@@ -641,11 +693,19 @@ int main(int argc, char *argv[]) {
         /* Send heartbeat */
         if (now - g_state.last_heartbeat >= g_state.config.heartbeat_interval_ms / 1000) {
             send_heartbeat();
+            /* Also send TCP heartbeat to peer endpoints */
+            if (g_state.config.peer_endpoint_count > 0) {
+                send_tcp_heartbeat_to_peers();
+            }
         }
         
         /* Check leader health */
         if (now - last_health_check >= 2) {
             check_leader_health();
+            /* Also check peer endpoints via TCP */
+            if (g_state.config.peer_endpoint_count > 0) {
+                check_peer_endpoints();
+            }
             last_health_check = now;
         }
         
@@ -654,7 +714,7 @@ int main(int argc, char *argv[]) {
     
     cleanup();
     
-    log_message(LOG_INFO, "Discovery Service stopped");
+    LOG_INFO(&g_state.logger, "Discovery Service stopped");
     
     return 0;
 }

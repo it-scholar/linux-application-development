@@ -37,10 +37,10 @@ static void parse_json_value(const char *json, const char *key, char *value, siz
 static void output_table(const char *json);
 static void output_json(const char *json);
 static void output_csv(const char *json);
-static int cmd_daily(int argc, char *argv[]);
-static int cmd_hourly(int argc, char *argv[]);
-static int cmd_stations(int argc, char *argv[]);
-static int cmd_health(int argc, char *argv[]);
+static int cmd_daily(int argc, char *const argv[]);
+static int cmd_hourly(int argc, char *const argv[]);
+static int cmd_stations(int argc, char *const argv[]);
+static int cmd_health(int argc, char *const argv[]);
 
 /* Print usage */
 static void print_usage(const char *program) {
@@ -427,7 +427,7 @@ static void output_csv(const char *json) {
 }
 
 /* Daily command */
-static int cmd_daily(int argc, char *argv[]) {
+static int cmd_daily(int argc, char *const argv[]) {
     char station_id[32] = "";
     char date[16] = "";
     char metric[8] = "";
@@ -491,7 +491,7 @@ static int cmd_daily(int argc, char *argv[]) {
 }
 
 /* Hourly command */
-static int cmd_hourly(int argc, char *argv[]) {
+static int cmd_hourly(int argc, char *const argv[]) {
     char station_id[32] = "";
     char hour[16] = "";
     char metric[8] = "";
@@ -550,7 +550,7 @@ static int cmd_hourly(int argc, char *argv[]) {
 }
 
 /* Stations command */
-static int cmd_stations(int argc, char *argv[]) {
+static int cmd_stations(int argc, char *const argv[]) {
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--format") == 0 && i + 1 < argc) {
             strncpy(g_config.output_format, argv[++i], sizeof(g_config.output_format) - 1);
@@ -576,7 +576,7 @@ static int cmd_stations(int argc, char *argv[]) {
 }
 
 /* Health command */
-static int cmd_health(int argc, char *argv[]) {
+static int cmd_health(int argc, char *const argv[]) {
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--api") == 0 && i + 1 < argc) {
             strncpy(g_config.api_endpoint, argv[++i], sizeof(g_config.api_endpoint) - 1);
@@ -602,7 +602,7 @@ static int cmd_health(int argc, char *argv[]) {
 }
 
 /* Main function */
-int main(int argc, char *argv[]) {
+int main(int argc, char *const argv[]) {
     /* Parse global options first */
     int cmd_start = 1;
     
@@ -637,7 +637,7 @@ int main(int argc, char *argv[]) {
     
     const char *command = argv[cmd_start];
     int cmd_argc = argc - cmd_start - 1;
-    char **cmd_argv = argv + cmd_start + 1;
+    char *const *cmd_argv = argv + cmd_start + 1;
     
     /* Dispatch command */
     if (strcmp(command, "help") == 0 || strcmp(command, "--help") == 0 || strcmp(command, "-h") == 0) {

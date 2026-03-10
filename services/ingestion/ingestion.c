@@ -5,147 +5,92 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <time.h>
 #include <errno.h>
 #include <sqlite3.h>
-#include <ctype.h>
 
-#define VERSION "1.0.0"
+/* Shared library headers */
+#include "common.h"
+#include "logging.h"
+#include "config.h"
+#include "daemon.h"
+
+#define VERSION "1.1.0"
 #define DEFAULT_CONFIG_FILE "ingestion.ini"
 #define DEFAULT_PID_FILE "/tmp/ingestion.pid"
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 8192
+#define MAX_REQUEST_SIZE 4096
 
 /* Configuration structure */
 typedef struct {
     char database_path[256];
     char csv_directory[256];
-    char log_file[256];
     int poll_interval_seconds;
-    int log_level;
-    int daemon_mode;
-} Config;
+    int api_port;
+} IngestionConfig;
 
 /* Global state */
 typedef struct {
-    Config config;
+    IngestionConfig config;
     sqlite3 *db;
-    volatile int running;
-    volatile int reload_config;
-    FILE *log_fp;
-} State;
+    int server_socket;
+    Logger logger;
+    DaemonState daemon;
+} IngestionState;
 
-static State g_state = {0};
+static IngestionState g_state = {0};
 
-/* Log levels */
-enum {
-    LOG_DEBUG = 0,
-    LOG_INFO,
-    LOG_WARN,
-    LOG_ERROR
-};
+/* HTTP response structure */
+typedef struct {
+    int status_code;
+    const char *content_type;
+    char body[BUFFER_SIZE];
+} HttpResponse;
 
-/* Function prototypes */
-static void log_message(int level, const char *format, ...);
-static int parse_config(const char *filename, Config *config);
+/* Forward declarations */
+static int parse_config_handler(const char *key, const char *value, void *user_data);
 static int init_database(const char *db_path);
 static int ingest_csv_file(const char *filepath);
-static void signal_handler(int sig);
 static void cleanup(void);
-static int write_pid_file(const char *pid_file);
-static void remove_pid_file(const char *pid_file);
+static void process_csv_files(void);
+static int start_api_server(void);
+static void handle_api_request(int client_socket);
+static void send_http_response(int client_socket, HttpResponse *response);
+static const char *get_status_text(int code);
 
-/* Logging function */
-static void log_message(int level, const char *format, ...) {
-    if (level < g_state.config.log_level) return;
+/* Configuration handler callback */
+static int parse_config_handler(const char *key, const char *value, void *user_data) {
+    IngestionConfig *config = (IngestionConfig *)user_data;
+    int log_level;
+    char log_file[256];
+    int daemon_mode;
     
-    const char *level_str[] = {"DEBUG", "INFO", "WARN", "ERROR"};
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char timestamp[26];
-    strftime(timestamp, 26, "%Y-%m-%d %H:%M:%S", tm_info);
-    
-    FILE *output = g_state.log_fp ? g_state.log_fp : stdout;
-    
-    fprintf(output, "[%s] [%s] ", timestamp, level_str[level]);
-    
-    va_list args;
-    va_start(args, format);
-    vfprintf(output, format, args);
-    va_end(args);
-    
-    fprintf(output, "\n");
-    fflush(output);
-}
-
-/* Parse configuration file */
-static int parse_config(const char *filename, Config *config) {
-    FILE *fp = fopen(filename, "r");
-    if (!fp) {
-        log_message(LOG_ERROR, "Cannot open config file: %s", filename);
-        return -1;
-    }
-    
-    char line[BUFFER_SIZE];
-    while (fgets(line, sizeof(line), fp)) {
-        /* Remove comments */
-        char *comment = strchr(line, '#');
-        if (comment) *comment = '\0';
-        
-        /* Remove trailing whitespace */
-        int len = strlen(line);
-        while (len > 0 && isspace(line[len-1])) {
-            line[--len] = '\0';
+    /* Handle common configuration keys */
+    if (config_handle_common(key, value, &log_level, log_file, sizeof(log_file), &daemon_mode)) {
+        if (strcmp(key, "log_level") == 0) {
+            g_state.logger.level = (LogLevel)log_level;
         }
-        
-        /* Skip empty lines */
-        if (len == 0) continue;
-        
-        /* Parse key = value */
-        char *key = line;
-        char *equals = strchr(line, '=');
-        if (!equals) continue;
-        
-        *equals = '\0';
-        char *value = equals + 1;
-        
-        /* Trim whitespace */
-        while (isspace(*key)) key++;
-        while (isspace(*value)) value++;
-        while (len > 0 && isspace(key[len-1])) key[--len] = '\0';
-        
-        if (strcmp(key, "database_path") == 0) {
-            strncpy(config->database_path, value, sizeof(config->database_path) - 1);
-        } else if (strcmp(key, "csv_directory") == 0) {
-            strncpy(config->csv_directory, value, sizeof(config->csv_directory) - 1);
-        } else if (strcmp(key, "log_file") == 0) {
-            strncpy(config->log_file, value, sizeof(config->log_file) - 1);
-        } else if (strcmp(key, "poll_interval_seconds") == 0) {
-            config->poll_interval_seconds = atoi(value);
-        } else if (strcmp(key, "log_level") == 0) {
-            if (strcmp(value, "debug") == 0) config->log_level = LOG_DEBUG;
-            else if (strcmp(value, "info") == 0) config->log_level = LOG_INFO;
-            else if (strcmp(value, "warn") == 0) config->log_level = LOG_WARN;
-            else if (strcmp(value, "error") == 0) config->log_level = LOG_ERROR;
-        } else if (strcmp(key, "daemon_mode") == 0) {
-            config->daemon_mode = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
-        }
+        return 0;
     }
     
-    fclose(fp);
+    /* Handle ingestion-specific keys */
+    if (strcmp(key, "database_path") == 0) {
+        SAFE_STRCPY(config->database_path, value, sizeof(config->database_path));
+    } else if (strcmp(key, "csv_directory") == 0) {
+        SAFE_STRCPY(config->csv_directory, value, sizeof(config->csv_directory));
+    } else if (strcmp(key, "poll_interval_seconds") == 0) {
+        config->poll_interval_seconds = atoi(value);
+    } else if (strcmp(key, "api_port") == 0) {
+        config->api_port = atoi(value);
+    } else {
+        LOG_WARN(&g_state.logger, "Unknown config key: %s", key);
+    }
     
-    /* Set defaults */
-    if (config->database_path[0] == '\0') {
-        strcpy(config->database_path, "weather.db");
-    }
-    if (config->csv_directory[0] == '\0') {
-        strcpy(config->csv_directory, "./data");
-    }
-    if (config->poll_interval_seconds == 0) {
-        config->poll_interval_seconds = 60;
-    }
-    
-    log_message(LOG_INFO, "Configuration loaded from %s", filename);
     return 0;
 }
 
@@ -153,7 +98,7 @@ static int parse_config(const char *filename, Config *config) {
 static int init_database(const char *db_path) {
     int rc = sqlite3_open(db_path, &g_state.db);
     if (rc != SQLITE_OK) {
-        log_message(LOG_ERROR, "Cannot open database: %s", sqlite3_errmsg(g_state.db));
+        LOG_ERROR(&g_state.logger, "Cannot open database: %s", sqlite3_errmsg(g_state.db));
         return -1;
     }
     
@@ -174,7 +119,7 @@ static int init_database(const char *db_path) {
     char *err_msg = NULL;
     rc = sqlite3_exec(g_state.db, create_table_sql, NULL, NULL, &err_msg);
     if (rc != SQLITE_OK) {
-        log_message(LOG_ERROR, "SQL error: %s", err_msg);
+        LOG_ERROR(&g_state.logger, "SQL error: %s", err_msg);
         sqlite3_free(err_msg);
         return -1;
     }
@@ -189,12 +134,12 @@ static int init_database(const char *db_path) {
     for (int i = 0; create_indexes[i] != NULL; i++) {
         rc = sqlite3_exec(g_state.db, create_indexes[i], NULL, NULL, &err_msg);
         if (rc != SQLITE_OK) {
-            log_message(LOG_ERROR, "SQL error creating index: %s", err_msg);
+            LOG_ERROR(&g_state.logger, "SQL error creating index: %s", err_msg);
             sqlite3_free(err_msg);
         }
     }
     
-    log_message(LOG_INFO, "Database initialized: %s", db_path);
+    LOG_INFO(&g_state.logger, "Database initialized: %s", db_path);
     return 0;
 }
 
@@ -202,11 +147,11 @@ static int init_database(const char *db_path) {
 static int ingest_csv_file(const char *filepath) {
     FILE *fp = fopen(filepath, "r");
     if (!fp) {
-        log_message(LOG_ERROR, "Cannot open CSV file: %s", filepath);
+        LOG_ERROR(&g_state.logger, "Cannot open CSV file: %s", filepath);
         return -1;
     }
     
-    log_message(LOG_INFO, "Ingesting file: %s", filepath);
+    LOG_INFO(&g_state.logger, "Ingesting file: %s", filepath);
     
     /* Prepare insert statement */
     const char *insert_sql = 
@@ -216,7 +161,7 @@ static int ingest_csv_file(const char *filepath) {
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(g_state.db, insert_sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        log_message(LOG_ERROR, "Failed to prepare statement: %s", sqlite3_errmsg(g_state.db));
+        LOG_ERROR(&g_state.logger, "Failed to prepare statement: %s", sqlite3_errmsg(g_state.db));
         fclose(fp);
         return -1;
     }
@@ -237,19 +182,19 @@ static int ingest_csv_file(const char *filepath) {
         
         /* Parse CSV line */
         /* NOAA GHCN-Daily format: station_id,date,element,value,mflag,qflag,sflag */
-        char station_id[32] = {0};
-        char date[16] = {0};
-        char element[8] = {0};
+        char station_id[12] = {0};
+        char date[9] = {0};
+        char element[6] = {0};
         double value = 0;
-        char mflag[8] = {0};
-        char qflag[8] = {0};
-        char sflag[8] = {0};
+        char mflag[2] = {0};
+        char qflag[2] = {0};
+        char sflag[2] = {0};
         
         int parsed = sscanf(line, "%11[^,],%8[^,],%5[^,],%lf,%1[^,],%1[^,],%1s",
                            station_id, date, element, &value, mflag, qflag, sflag);
         
         if (parsed < 4) {
-            log_message(LOG_WARN, "Skipping malformed line %d in %s", line_count, filepath);
+            LOG_WARN(&g_state.logger, "Skipping malformed line %d in %s", line_count, filepath);
             error_count++;
             continue;
         }
@@ -266,7 +211,7 @@ static int ingest_csv_file(const char *filepath) {
         /* Execute */
         rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE) {
-            log_message(LOG_WARN, "Failed to insert line %d: %s", line_count, sqlite3_errmsg(g_state.db));
+            LOG_WARN(&g_state.logger, "Failed to insert line %d: %s", line_count, sqlite3_errmsg(g_state.db));
             error_count++;
         } else {
             inserted_count++;
@@ -283,74 +228,307 @@ static int ingest_csv_file(const char *filepath) {
     sqlite3_finalize(stmt);
     fclose(fp);
     
-    log_message(LOG_INFO, "File %s processed: %d lines, %d inserted, %d errors",
+    LOG_INFO(&g_state.logger, "File %s processed: %d lines, %d inserted, %d errors",
                 filepath, line_count, inserted_count, error_count);
     
     return (error_count > 0) ? -1 : 0;
 }
 
-/* Signal handler */
-static void signal_handler(int sig) {
-    switch (sig) {
-        case SIGTERM:
-        case SIGINT:
-            log_message(LOG_INFO, "Received signal %d, shutting down gracefully...", sig);
-            g_state.running = 0;
-            break;
-        case SIGHUP:
-            log_message(LOG_INFO, "Received SIGHUP, reloading configuration...");
-            g_state.reload_config = 1;
-            break;
+/* Process all CSV files in directory */
+static void process_csv_files(void) {
+    DIR *dir = opendir(g_state.config.csv_directory);
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            /* Check if file ends with .csv */
+            int len = strlen(entry->d_name);
+            if (len > 4 && strcmp(entry->d_name + len - 4, ".csv") == 0) {
+                char filepath[512];
+                snprintf(filepath, sizeof(filepath), "%s/%s",
+                        g_state.config.csv_directory, entry->d_name);
+                
+                /* Process file */
+                ingest_csv_file(filepath);
+            }
+        }
+        closedir(dir);
+    } else {
+        LOG_ERROR(&g_state.logger, "Cannot open CSV directory: %s", g_state.config.csv_directory);
+    }
+}
+
+/* Start HTTP API server */
+static int start_api_server(void) {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        LOG_ERROR(&g_state.logger, "Failed to create socket: %s", strerror(errno));
+        return -1;
+    }
+    
+    /* Allow socket reuse */
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        LOG_ERROR(&g_state.logger, "Failed to set socket options: %s", strerror(errno));
+        close(server_fd);
+        return -1;
+    }
+    
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(g_state.config.api_port);
+    
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        LOG_ERROR(&g_state.logger, "Failed to bind to port %d: %s",
+                   g_state.config.api_port, strerror(errno));
+        close(server_fd);
+        return -1;
+    }
+    
+    if (listen(server_fd, 10) < 0) {
+        LOG_ERROR(&g_state.logger, "Failed to listen: %s", strerror(errno));
+        close(server_fd);
+        return -1;
+    }
+    
+    /* Set non-blocking */
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+    
+    g_state.server_socket = server_fd;
+    
+    LOG_INFO(&g_state.logger, "API server listening on port %d", g_state.config.api_port);
+    
+    return 0;
+}
+
+/* Handle API request */
+static void handle_api_request(int client_socket) {
+    char buffer[MAX_REQUEST_SIZE];
+    int bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+    
+    if (bytes_read <= 0) {
+        close(client_socket);
+        return;
+    }
+    
+    buffer[bytes_read] = '\0';
+    
+    /* Parse request line */
+    char method[16], path[256], protocol[16];
+    if (sscanf(buffer, "%15s %255s %15s", method, path, protocol) != 3) {
+        HttpResponse response; 
+        response.status_code = 400; 
+        response.content_type = "application/json"; 
+        strncpy(response.body, "{\"error\": \"Bad Request\"}", BUFFER_SIZE - 1); 
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        close(client_socket);
+        return;
+    }
+    
+    LOG_DEBUG(&g_state.logger, "%s %s", method, path);
+    
+    /* Only handle GET requests */
+    if (strcmp(method, "GET") != 0) {
+        HttpResponse response; 
+        response.status_code = 405; 
+        response.content_type = "application/json"; 
+        strncpy(response.body, "{\"error\": \"Method Not Allowed\"}", BUFFER_SIZE - 1); 
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        close(client_socket);
+        return;
+    }
+    
+    /* Route request */
+    if (strcmp(path, "/health") == 0) {
+        HttpResponse response; 
+        response.status_code = 200; 
+        response.content_type = "application/json"; 
+        snprintf(response.body, BUFFER_SIZE, "{\"status\": \"healthy\", \"version\": \"%s\"}", VERSION);
+        send_http_response(client_socket, &response);
+    } else if (strncmp(path, "/api/v1/weather/raw", 19) == 0) {
+        /* Return raw weather data with pagination support */
+        /* Parse offset and limit from query string: ?offset=0&limit=10000 */
+        int offset = 0;
+        int limit = 10000;  /* Default limit to prevent timeouts */
+        
+        char *query = strchr(path, '?');
+        if (query) {
+            query++;
+            char *offset_param = strstr(query, "offset=");
+            if (offset_param) {
+                offset = atoi(offset_param + 7);
+                if (offset < 0) offset = 0;
+            }
+            char *limit_param = strstr(query, "limit=");
+            if (limit_param) {
+                limit = atoi(limit_param + 6);
+                if (limit < 1) limit = 10000;
+                if (limit > 50000) limit = 50000;  /* Cap at 50k to prevent timeouts */
+            }
+        }
+        
+        /* Build SQL query with pagination */
+        char sql[256];
+        snprintf(sql, sizeof(sql), 
+                 "SELECT station_id, date, element, value, mflag, qflag, sflag "
+                 "FROM weather_data ORDER BY date DESC LIMIT %d OFFSET %d",
+                 limit, offset);
+        
+        sqlite3_stmt *stmt;
+        int rc = sqlite3_prepare_v2(g_state.db, sql, -1, &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            HttpResponse response; 
+            response.status_code = 500; 
+            response.content_type = "application/json"; 
+            strncpy(response.body, "{\"error\": \"Database error\"}", BUFFER_SIZE - 1); 
+            response.body[BUFFER_SIZE - 1] = '\0';
+            send_http_response(client_socket, &response);
+        } else {
+            char json[BUFFER_SIZE];
+            int pos = snprintf(json, sizeof(json), "{\"data\": [");
+            int first = 1;
+            int record_count = 0;
+            
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW && pos < BUFFER_SIZE - 512) {
+                const char *station_id = (const char *)sqlite3_column_text(stmt, 0);
+                const char *date = (const char *)sqlite3_column_text(stmt, 1);
+                const char *element = (const char *)sqlite3_column_text(stmt, 2);
+                double value = sqlite3_column_double(stmt, 3);
+                const char *mflag = (const char *)sqlite3_column_text(stmt, 4);
+                const char *qflag = (const char *)sqlite3_column_text(stmt, 5);
+                const char *sflag = (const char *)sqlite3_column_text(stmt, 6);
+                
+                pos += snprintf(json + pos, sizeof(json) - pos, "%s{\"station_id\":\"%s\",\"date\":\"%s\",\"element\":\"%s\","
+                               "\"value\":%.2f,\"mflag\":\"%s\",\"qflag\":\"%s\",\"sflag\":\"%s\"}",
+                               first ? "" : ",",
+                               station_id ? station_id : "",
+                               date ? date : "",
+                               element ? element : "",
+                               value,
+                               mflag ? mflag : "",
+                               qflag ? qflag : "",
+                               sflag ? sflag : "");
+                
+                first = 0;
+                record_count++;
+            }
+            
+            sqlite3_finalize(stmt);
+            
+            /* Get total count */
+            int total_count = 0;
+            sqlite3_stmt *count_stmt;
+            rc = sqlite3_prepare_v2(g_state.db, "SELECT COUNT(*) FROM weather_data", -1, &count_stmt, NULL);
+            if (rc == SQLITE_OK) {
+                if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+                    total_count = sqlite3_column_int(count_stmt, 0);
+                }
+                sqlite3_finalize(count_stmt);
+            }
+            
+            snprintf(json + pos, sizeof(json) - pos, "],\"offset\":%d,\"limit\":%d,\"total\":%d,\"count\":%d}",
+                     offset, limit, total_count, record_count);
+            
+            HttpResponse response;
+            response.status_code = 200;
+            response.content_type = "application/json";
+            strncpy(response.body, json, BUFFER_SIZE - 1);
+            response.body[BUFFER_SIZE - 1] = '\0';
+            send_http_response(client_socket, &response);
+        }
+    } else if (strcmp(path, "/api/v1/stats") == 0) {
+        /* Return statistics */
+        int count = 0;
+        sqlite3_stmt *stmt;
+        int rc = sqlite3_prepare_v2(g_state.db, "SELECT COUNT(*) FROM weather_data", -1, &stmt, NULL);
+        if (rc == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                count = sqlite3_column_int(stmt, 0);
+            }
+            sqlite3_finalize(stmt);
+        }
+        
+        HttpResponse response;
+        response.status_code = 200;
+        response.content_type = "application/json";
+        snprintf(response.body, BUFFER_SIZE, "{\"total_records\": %d}", count);
+        send_http_response(client_socket, &response);
+    } else {
+        HttpResponse response; 
+        response.status_code = 404; 
+        response.content_type = "application/json"; 
+        strncpy(response.body, "{\"error\": \"Not Found\"}", BUFFER_SIZE - 1); 
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+    }
+    
+    close(client_socket);
+}
+
+/* Send HTTP response */
+static void send_http_response(int client_socket, HttpResponse *response) {
+    char headers[512];
+    int header_len = snprintf(headers, sizeof(headers),
+                              "HTTP/1.1 %d %s\r\n"
+                              "Content-Type: %s\r\n"
+                              "Content-Length: %zu\r\n"
+                              "Connection: close\r\n"
+                              "\r\n",
+                              response->status_code,
+                              get_status_text(response->status_code),
+                              response->content_type,
+                              strlen(response->body));
+    
+    send(client_socket, headers, header_len, 0);
+    send(client_socket, response->body, strlen(response->body), 0);
+}
+
+/* Get HTTP status text */
+static const char *get_status_text(int code) {
+    switch (code) {
+        case 200: return "OK";
+        case 400: return "Bad Request";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 500: return "Internal Server Error";
+        default: return "Unknown";
     }
 }
 
 /* Cleanup function */
 static void cleanup(void) {
-    log_message(LOG_INFO, "Cleaning up...");
+    LOG_INFO(&g_state.logger, "Cleaning up...");
+    
+    if (g_state.server_socket > 0) {
+        close(g_state.server_socket);
+        g_state.server_socket = -1;
+    }
     
     if (g_state.db) {
         sqlite3_close(g_state.db);
         g_state.db = NULL;
     }
     
-    if (g_state.log_fp && g_state.log_fp != stdout) {
-        fclose(g_state.log_fp);
-        g_state.log_fp = NULL;
-    }
-    
-    remove_pid_file(DEFAULT_PID_FILE);
-}
-
-/* Write PID file */
-static int write_pid_file(const char *pid_file) {
-    FILE *fp = fopen(pid_file, "w");
-    if (!fp) {
-        log_message(LOG_ERROR, "Cannot write PID file: %s", pid_file);
-        return -1;
-    }
-    
-    fprintf(fp, "%d\n", getpid());
-    fclose(fp);
-    
-    return 0;
-}
-
-/* Remove PID file */
-static void remove_pid_file(const char *pid_file) {
-    unlink(pid_file);
+    daemon_cleanup(&g_state.daemon);
+    logger_close(&g_state.logger);
 }
 
 /* Main function */
-int main(int argc, char *argv[]) {
+int main(int argc, char *const argv[]) {
     const char *config_file = DEFAULT_CONFIG_FILE;
     int validate_only = 0;
+    int daemon_mode = 0;
     
     /* Parse command line arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_file = argv[++i];
         } else if (strcmp(argv[i], "--daemon") == 0) {
-            g_state.config.daemon_mode = 1;
+            daemon_mode = 1;
         } else if (strcmp(argv[i], "--validate") == 0) {
             validate_only = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -365,8 +543,17 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    /* Initialize logger to stderr initially for early messages */
+    logger_init(&g_state.logger, "ingestion", LOG_LEVEL_INFO, NULL);
+    
+    /* Set default configuration */
+    strcpy(g_state.config.database_path, "weather.db");
+    strcpy(g_state.config.csv_directory, "./data");
+    g_state.config.poll_interval_seconds = 60;
+    g_state.config.api_port = 8080;
+    
     /* Parse configuration */
-    if (parse_config(config_file, &g_state.config) != 0) {
+    if (config_parse(config_file, parse_config_handler, &g_state.config) < 0) {
         fprintf(stderr, "Failed to parse configuration\n");
         return 1;
     }
@@ -377,49 +564,23 @@ int main(int argc, char *argv[]) {
         printf("  Database: %s\n", g_state.config.database_path);
         printf("  CSV Directory: %s\n", g_state.config.csv_directory);
         printf("  Poll Interval: %d seconds\n", g_state.config.poll_interval_seconds);
+        printf("  API Port: %d\n", g_state.config.api_port);
         return 0;
     }
     
-    /* Open log file if specified */
-    if (g_state.config.log_file[0] != '\0') {
-        g_state.log_fp = fopen(g_state.config.log_file, "a");
-        if (!g_state.log_fp) {
-            fprintf(stderr, "Cannot open log file: %s\n", g_state.config.log_file);
-            g_state.log_fp = stdout;
-        }
-    }
-    
     /* Daemon mode */
-    if (g_state.config.daemon_mode) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            log_message(LOG_ERROR, "Fork failed");
-            return 1;
-        }
-        if (pid > 0) {
-            /* Parent process */
+    if (daemon_mode) {
+        if (daemon_fork() != 0) {
+            /* Parent exits */
             return 0;
         }
-        
-        /* Child process */
-        setsid();
-        chdir("/");
-        
-        /* Redirect standard files to /dev/null */
-        freopen("/dev/null", "r", stdin);
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
     }
     
-    /* Write PID file */
-    if (write_pid_file(DEFAULT_PID_FILE) != 0) {
-        return 1;
-    }
+    /* Initialize daemon state */
+    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, cleanup);
     
     /* Setup signal handlers */
-    signal(SIGTERM, signal_handler);
-    signal(SIGINT, signal_handler);
-    signal(SIGHUP, signal_handler);
+    daemon_setup_signals(&g_state.daemon);
     
     /* Initialize database */
     if (init_database(g_state.config.database_path) != 0) {
@@ -427,62 +588,54 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    log_message(LOG_INFO, "Ingestion Service v%s started", VERSION);
-    log_message(LOG_INFO, "Watching directory: %s", g_state.config.csv_directory);
-    log_message(LOG_INFO, "Database: %s", g_state.config.database_path);
+    /* Start API server */
+    if (start_api_server() != 0) {
+        cleanup();
+        return 1;
+    }
+    
+    LOG_INFO(&g_state.logger, "Ingestion Service v%s started", VERSION);
+    LOG_INFO(&g_state.logger, "Watching directory: %s", g_state.config.csv_directory);
+    LOG_INFO(&g_state.logger, "Database: %s", g_state.config.database_path);
+    LOG_INFO(&g_state.logger, "API Port: %d", g_state.config.api_port);
+    
+    /* Write PID file for health checks */
+    daemon_write_pid_file(DEFAULT_PID_FILE);
     
     /* Main loop */
-    g_state.running = 1;
     time_t last_check = 0;
     
-    while (g_state.running) {
+    while (!daemon_should_stop(&g_state.daemon)) {
         /* Check for config reload */
-        if (g_state.reload_config) {
-            g_state.reload_config = 0;
-            log_message(LOG_INFO, "Reloading configuration...");
-            parse_config(config_file, &g_state.config);
+        if (daemon_should_reload(&g_state.daemon)) {
+            LOG_INFO(&g_state.logger, "Reloading configuration...");
+            config_parse(config_file, parse_config_handler, &g_state.config);
+        }
+        
+        /* Accept API connections */
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client_socket = accept(g_state.server_socket, (struct sockaddr *)&client_addr, &addr_len);
+        
+        if (client_socket >= 0) {
+            handle_api_request(client_socket);
         }
         
         /* Check for CSV files */
         time_t now = time(NULL);
         if (now - last_check >= g_state.config.poll_interval_seconds) {
             last_check = now;
-            
-            DIR *dir = opendir(g_state.config.csv_directory);
-            if (dir) {
-                struct dirent *entry;
-                while ((entry = readdir(dir)) != NULL) {
-                    /* Check if file ends with .csv */
-                    int len = strlen(entry->d_name);
-                    if (len > 4 && strcmp(entry->d_name + len - 4, ".csv") == 0) {
-                        char filepath[512];
-                        snprintf(filepath, sizeof(filepath), "%s/%s",
-                                g_state.config.csv_directory, entry->d_name);
-                        
-                        /* Process file */
-                        ingest_csv_file(filepath);
-                        
-                        /* Optionally move processed file */
-                        /* char processed_path[512]; */
-                        /* snprintf(processed_path, sizeof(processed_path), "%s/processed/%s", */
-                        /*         g_state.config.csv_directory, entry->d_name); */
-                        /* rename(filepath, processed_path); */
-                    }
-                }
-                closedir(dir);
-            } else {
-                log_message(LOG_ERROR, "Cannot open CSV directory: %s", g_state.config.csv_directory);
-            }
+            process_csv_files();
         }
         
         /* Sleep for a short period */
-        sleep(1);
+        usleep(10000); /* 10ms */
     }
     
     /* Cleanup */
     cleanup();
     
-    log_message(LOG_INFO, "Ingestion Service stopped");
+    LOG_INFO(&g_state.logger, "Ingestion Service stopped");
     
     return 0;
 }
