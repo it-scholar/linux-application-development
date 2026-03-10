@@ -1,0 +1,97 @@
+{{- if .Values.aggregation.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weather-station.fullname" . }}-aggregation
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.aggregation.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.aggregation.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "weather-station.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: aggregation
+  template:
+    metadata:
+      labels:
+        {{- include "weather-station.aggregation.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "weather-station.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      {{- if and .Values.aggregation.initContainers.enabled .Values.aggregation.initContainers.waitForIngestion }}
+      initContainers:
+        - name: wait-for-ingestion
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for ingestion service to be ready..."
+              until nc -z {{ include "weather-station.fullname" . }}-ingestion 8080; do
+                echo "Ingestion not ready yet, waiting..."
+                sleep 2
+              done
+              echo "Ingestion is ready!"
+      {{- end }}
+      containers:
+        - name: aggregation
+          image: "{{ .Values.aggregation.image.repository }}:{{ .Values.aggregation.image.tag }}"
+          imagePullPolicy: {{ .Values.aggregation.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/weather-station/aggregation.ini"
+            - ""
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          {{- if .Values.aggregation.probes.liveness.enabled }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /tmp/aggregation.pid && kill -0 $(cat /tmp/aggregation.pid)"
+            initialDelaySeconds: {{ .Values.aggregation.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.aggregation.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.aggregation.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.aggregation.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.aggregation.probes.readiness.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /tmp/aggregation.pid && kill -0 $(cat /tmp/aggregation.pid)"
+            initialDelaySeconds: {{ .Values.aggregation.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.aggregation.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.aggregation.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.aggregation.probes.readiness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/weather-station
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "weather-station.fullname" . }}-config
+        - name: data
+          {{- if .Values.aggregation.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "weather-station.fullname" . }}-aggregation-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

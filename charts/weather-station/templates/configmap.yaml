@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "weather-station.fullname" . }}-config
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.labels" . | nindent 4 }}
+data:
+  ingestion.ini: |
+    database_path = {{ .Values.ingestion.config.database_path }}
+    csv_directory = {{ .Values.ingestion.config.csv_directory }}
+    poll_interval_seconds = {{ .Values.ingestion.config.poll_interval_seconds }}
+    log_level = {{ .Values.ingestion.config.log_level }}
+  
+  aggregation.ini: |
+    ingestion_url = http://weather-station-ingestion:8080/api/v1/weather/raw
+    output_database = {{ .Values.aggregation.config.output_database }}
+    aggregation_interval_seconds = {{ .Values.aggregation.config.aggregation_interval_seconds }}
+    log_level = {{ .Values.aggregation.config.log_level }}
+  
+  query.ini: |
+    database_path = {{ .Values.query.config.database_path }}
+    bind_address = {{ .Values.query.config.bind_address }}
+    port = {{ .Values.query.config.port }}
+    log_level = {{ .Values.query.config.log_level }}
+  
+  discovery.ini: |
+    node_id = {{ .Values.discovery.config.node_id | default (printf "%s-%s" (include "weather-station.fullname" .) "discovery") }}
+    bind_address = {{ .Values.discovery.config.bind_address }}
+    discovery_port = {{ .Values.discovery.config.discovery_port }}
+    election_timeout_ms = {{ .Values.discovery.config.election_timeout_ms }}
+    heartbeat_interval_ms = {{ .Values.discovery.config.heartbeat_interval_ms }}
+    log_level = {{ .Values.discovery.config.log_level }}
+    {{- range .Values.discovery.config.peer_endpoints }}
+    peer_endpoint = {{ . }}
+    {{- end }}

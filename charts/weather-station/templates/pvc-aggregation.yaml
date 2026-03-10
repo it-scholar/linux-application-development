@@ -1,0 +1,20 @@
+{{- if and .Values.aggregation.enabled .Values.aggregation.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "weather-station.fullname" . }}-aggregation-data
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.aggregation.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.aggregation.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.aggregation.persistence.size }}
+  {{- if .Values.aggregation.persistence.storageClass }}
+  storageClassName: {{ .Values.aggregation.persistence.storageClass }}
+  {{- else if .Values.global.storageClass }}
+  storageClassName: {{ .Values.global.storageClass }}
+  {{- end }}
+{{- end }}

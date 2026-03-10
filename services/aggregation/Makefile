@@ -1,17 +1,25 @@
 # Aggregation Service Makefile
+# Links with shared weather station library
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L
-LDFLAGS = -lsqlite3
+CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L \
+         -I../shared/include
+LDFLAGS = -lsqlite3 -lcurl \
+          -L../shared/lib -lweather
 TARGET = aggregation
 SRC = aggregation.c
+
+SHARED_LIB = ../shared/lib/libweather.a
 
 .PHONY: all clean test install
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
+$(TARGET): $(SRC) $(SHARED_LIB)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS)
+
+$(SHARED_LIB):
+	$(MAKE) -C ../shared
 
 clean:
 	rm -f $(TARGET)

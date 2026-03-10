@@ -1,0 +1,17 @@
+apiVersion: v2
+name: weather-station
+description: A Helm chart for Weather Station Microservices
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - weather
+  - microservices
+  - monitoring
+home: https://github.com/yourusername/weather-station
+sources:
+  - https://github.com/yourusername/weather-station
+maintainers:
+  - name: Weather Station Team
+    email: team@weather-station.io
+dependencies: []

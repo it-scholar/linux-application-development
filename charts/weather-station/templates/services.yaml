@@ -1,0 +1,79 @@
+{{- if .Values.ingestion.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "weather-station.fullname" . }}-ingestion
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.ingestion.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.ingestion.service.type }}
+  ports:
+    - port: {{ .Values.ingestion.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "weather-station.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+---
+{{- end }}
+{{- if .Values.aggregation.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "weather-station.fullname" . }}-aggregation
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.aggregation.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.aggregation.service.type }}
+  ports:
+    - port: {{ .Values.aggregation.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "weather-station.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: aggregation
+---
+{{- end }}
+{{- if .Values.query.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "weather-station.fullname" . }}-query
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.query.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.query.service.type }}
+  ports:
+    - port: {{ .Values.query.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "weather-station.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: query
+---
+{{- end }}
+{{- if .Values.discovery.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "weather-station.fullname" . }}-discovery
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.discovery.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.discovery.service.type }}
+  ports:
+    - port: {{ .Values.discovery.service.port }}
+      targetPort: discovery
+      protocol: UDP
+      name: discovery
+  selector:
+    {{- include "weather-station.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: discovery
+{{- end }}

@@ -1,0 +1,20 @@
+{{- if and .Values.ingestion.enabled .Values.ingestion.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "weather-station.fullname" . }}-ingestion-data
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.ingestion.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.ingestion.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.ingestion.persistence.size }}
+  {{- if .Values.ingestion.persistence.storageClass }}
+  storageClassName: {{ .Values.ingestion.persistence.storageClass }}
+  {{- else if .Values.global.storageClass }}
+  storageClassName: {{ .Values.global.storageClass }}
+  {{- end }}
+{{- end }}

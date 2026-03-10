@@ -1,0 +1,58 @@
+{{- if .Values.monitoring.enabled }}
+{{- if .Values.ingestion.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "weather-station.fullname" . }}-ingestion
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.ingestion.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "weather-station.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ingestion
+  endpoints:
+    - port: http
+      interval: {{ .Values.monitoring.interval }}
+      path: /metrics
+---
+{{- end }}
+{{- if .Values.aggregation.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "weather-station.fullname" . }}-aggregation
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.aggregation.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "weather-station.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: aggregation
+  endpoints:
+    - port: http
+      interval: {{ .Values.monitoring.interval }}
+      path: /metrics
+---
+{{- end }}
+{{- if .Values.query.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "weather-station.fullname" . }}-query
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.query.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "weather-station.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: query
+  endpoints:
+    - port: http
+      interval: {{ .Values.monitoring.interval }}
+      path: /metrics
+{{- end }}
+{{- end }}

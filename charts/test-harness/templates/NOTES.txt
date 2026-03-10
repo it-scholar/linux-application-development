@@ -1,0 +1,31 @@
+Weather Station Test Harness has been deployed!
+
+{{- if .Values.weather-station.enabled }}
+Weather Station services have also been deployed automatically.
+{{- end }}
+
+To verify the test harness:
+
+1. Check the CronJob status:
+   kubectl get cronjob -n {{ .Values.namespace.name }} {{ include "test-harness.fullname" . }}
+
+2. View the last test run:
+   kubectl get jobs -n {{ .Values.namespace.name }}
+
+3. Check test logs:
+   kubectl logs -n {{ .Values.namespace.name }} -l app.kubernetes.io/name={{ include "test-harness.name" . }} --tail=100
+
+4. View test results:
+   kubectl exec -n {{ .Values.namespace.name }} deployment/{{ include "test-harness.fullname" . }} -- ls -la /data/
+
+5. Manually trigger a test run:
+   kubectl create job -n {{ .Values.namespace.name }} --from=cronjob/{{ include "test-harness.fullname" . }} manual-test-$(date +%s)
+
+Schedule: {{ .Values.testHarness.schedule }} (runs every hour)
+Fail Threshold: {{ .Values.testHarness.config.failThreshold }}%
+
+Test results are stored in:
+  PVC: {{ include "test-harness.fullname" . }}-results
+
+To view all deployed resources:
+  kubectl get all -n {{ .Values.namespace.name }}

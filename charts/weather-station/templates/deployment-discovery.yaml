@@ -1,0 +1,49 @@
+{{- if .Values.discovery.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weather-station.fullname" . }}-discovery
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.discovery.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.discovery.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "weather-station.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: discovery
+  template:
+    metadata:
+      labels:
+        {{- include "weather-station.discovery.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "weather-station.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: discovery
+          image: "{{ .Values.discovery.image.repository }}:{{ .Values.discovery.image.tag }}"
+          imagePullPolicy: {{ .Values.discovery.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/weather-station/discovery.ini"
+            - ""
+          ports:
+            - name: discovery
+              containerPort: 9000
+              protocol: UDP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/weather-station
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "weather-station.fullname" . }}-config
+{{- end }}

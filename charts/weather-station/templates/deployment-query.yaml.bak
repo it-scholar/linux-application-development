@@ -1,0 +1,93 @@
+{{- if .Values.query.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weather-station.fullname" . }}-query
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.query.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.query.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "weather-station.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: query
+  template:
+    metadata:
+      labels:
+        {{- include "weather-station.query.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "weather-station.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      {{- if and .Values.query.initContainers.enabled .Values.query.initContainers.waitForAggregation }}
+      initContainers:
+        - name: wait-for-aggregation
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for aggregation service to be ready..."
+              until nc -z {{ include "weather-station.fullname" . }}-aggregation 8080; do
+                echo "Aggregation not ready yet, waiting..."
+                sleep 2
+              done
+              echo "Aggregation is ready!"
+      {{- end }}
+      containers:
+        - name: query
+          image: "{{ .Values.query.image.repository }}:{{ .Values.query.image.tag }}"
+          imagePullPolicy: {{ .Values.query.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/weather-station/query.ini"
+            - ""
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          {{- if .Values.query.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.query.probes.liveness.path }}
+              port: {{ .Values.query.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.query.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.query.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.query.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.query.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.query.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.query.probes.readiness.path }}
+              port: {{ .Values.query.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.query.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.query.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.query.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.query.probes.readiness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/weather-station
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "weather-station.fullname" . }}-config
+        - name: data
+          {{- if .Values.query.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "weather-station.fullname" . }}-query-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

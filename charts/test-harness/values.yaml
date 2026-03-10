@@ -1,0 +1,91 @@
+# Default values for test-harness.
+# This is a YAML-formatted file.
+
+nameOverride: ""
+fullnameOverride: ""
+
+namespace:
+  name: weather-station
+
+# Weather Station dependency
+weather-station:
+  enabled: true
+
+# Test Harness Configuration
+testHarness:
+  enabled: true
+  image:
+    repository: weather-station-test-harness
+    tag: latest
+    pullPolicy: IfNotPresent
+  
+  # CronJob schedule - runs every hour
+  schedule: "0 * * * *"
+  
+  # Job configuration
+  job:
+    # Time limit for the test job
+    activeDeadlineSeconds: 1800
+    # Keep last N successful job history
+    successfulJobsHistoryLimit: 3
+    # Keep last N failed job history
+    failedJobsHistoryLimit: 3
+    # Suspend cronjob (useful for maintenance)
+    suspend: false
+    # Concurrency policy
+    concurrencyPolicy: Forbid
+    # Starting deadline seconds
+    startingDeadlineSeconds: 300
+  
+  # Test configuration
+  config:
+    # Fail threshold (percentage)
+    failThreshold: 80
+    # Verbose output
+    verbose: true
+    # Services to test
+    services:
+      - ingestion
+      - aggregation
+      - query
+      - discovery
+  
+  # Environment variables
+  env:
+    - name: INGESTION_URL
+      value: "http://weather-station-ingestion:8080"
+    - name: AGGREGATION_URL
+      value: "http://weather-station-aggregation:8080"
+    - name: QUERY_URL
+      value: "http://weather-station-query:8080"
+    - name: DISCOVERY_URL
+      value: "http://weather-station-discovery:9000"
+
+# Service Account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# RBAC Configuration
+rbac:
+  create: true
+  # Allow test harness to read pods and services
+  rules:
+    - apiGroups: [""]
+      resources: ["pods", "services", "endpoints"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: ["apps"]
+      resources: ["deployments", "replicasets"]
+      verbs: ["get", "list", "watch"]
+
+# Persistent Volume for test results
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+
+# Monitoring
+monitoring:
+  enabled: false

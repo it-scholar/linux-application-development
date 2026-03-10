@@ -1,21 +1,28 @@
 # Ingestion Service Makefile
+# Links with shared weather station library
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L
-LDFLAGS = -lsqlite3
+CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L \
+         -I../shared/include
+LDFLAGS = -lsqlite3 \
+          -L../shared/lib -lweather
 TARGET = ingestion
 SRC = ingestion.c
 
 # Directories
 DATA_DIR = data
 PROCESSED_DIR = $(DATA_DIR)/processed
+SHARED_LIB = ../shared/lib/libweather.a
 
 .PHONY: all clean dirs test install
 
 all: $(TARGET) dirs
 
-$(TARGET): $(SRC)
+$(TARGET): $(SRC) $(SHARED_LIB)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS)
+
+$(SHARED_LIB):
+	$(MAKE) -C ../shared
 
 dirs:
 	@mkdir -p $(DATA_DIR)

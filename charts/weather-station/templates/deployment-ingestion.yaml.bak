@@ -1,0 +1,82 @@
+{{- if .Values.ingestion.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weather-station.fullname" . }}-ingestion
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "weather-station.ingestion.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ingestion.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "weather-station.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ingestion
+  template:
+    metadata:
+      labels:
+        {{- include "weather-station.ingestion.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "weather-station.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: ingestion
+          image: "{{ .Values.ingestion.image.repository }}:{{ .Values.ingestion.image.tag }}"
+          imagePullPolicy: {{ .Values.ingestion.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/weather-station/ingestion.ini"
+            - ""
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          {{- if .Values.ingestion.probes.liveness.enabled }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /tmp/ingestion.pid && kill -0 $(cat /tmp/ingestion.pid)"
+            initialDelaySeconds: {{ .Values.ingestion.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ingestion.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.ingestion.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.ingestion.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.ingestion.probes.readiness.enabled }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /tmp/ingestion.pid && kill -0 $(cat /tmp/ingestion.pid)"
+            initialDelaySeconds: {{ .Values.ingestion.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ingestion.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.ingestion.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.ingestion.probes.readiness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/weather-station
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "weather-station.fullname" . }}-config
+        - name: data
+          {{- if .Values.ingestion.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "weather-station.fullname" . }}-ingestion-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

@@ -1,0 +1,75 @@
+{{- if .Values.testHarness.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "test-harness.fullname" . }}
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "test-harness.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.testHarness.schedule | quote }}
+  concurrencyPolicy: {{ .Values.testHarness.job.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.testHarness.job.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.testHarness.job.failedJobsHistoryLimit }}
+  suspend: {{ .Values.testHarness.job.suspend }}
+  startingDeadlineSeconds: {{ .Values.testHarness.job.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.testHarness.job.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "test-harness.selectorLabels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "test-harness.serviceAccountName" . }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+          restartPolicy: OnFailure
+          initContainers:
+            - name: wait-for-services
+              image: busybox:1.36
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Waiting for all services to be ready..."
+                  {{- range .Values.testHarness.config.services }}
+                  until nc -z weather-station-{{ . }} 8080; do
+                    echo "Waiting for {{ . }} service..."
+                    sleep 2
+                  done
+                  echo "{{ . }} is ready!"
+                  {{- end }}
+                  echo "All services are ready! Starting tests..."
+          containers:
+            - name: test-harness
+              image: "{{ .Values.testHarness.image.repository }}:{{ .Values.testHarness.image.tag }}"
+              imagePullPolicy: {{ .Values.testHarness.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  # Run CI pipeline
+                  test-harness ci \
+                    --verbose \
+                    --fail-threshold {{ .Values.testHarness.config.failThreshold }} \
+                    2>&1 | tee /data/test-results-$(date +%Y%m%d-%H%M%S).log
+                  
+                  # Export results
+                  test-harness export /data/latest-results.json
+              env:
+                {{- toYaml .Values.testHarness.env | nindent 16 }}
+              volumeMounts:
+                - name: test-results
+                  mountPath: /data
+          volumes:
+            - name: test-results
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "test-harness.fullname" . }}-results
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+{{- end }}

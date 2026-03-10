@@ -1,0 +1,27 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "test-harness.fullname" . }}
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "test-harness.labels" . | nindent 4 }}
+rules:
+  {{- toYaml .Values.rbac.rules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "test-harness.fullname" . }}
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "test-harness.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "test-harness.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "test-harness.serviceAccountName" . }}
+    namespace: {{ .Values.namespace.name }}
+{{- end }}

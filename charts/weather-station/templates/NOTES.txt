@@ -1,0 +1,26 @@
+Weather Station Microservices have been deployed!
+
+To verify the deployment:
+
+1. Check pod status:
+   kubectl get pods -n {{ .Values.namespace.name }}
+
+2. Check service endpoints:
+   kubectl get svc -n {{ .Values.namespace.name }}
+
+3. Access the Query API:
+   kubectl port-forward svc/{{ include "weather-station.fullname" . }}-query 8080:8080 -n {{ .Values.namespace.name }}
+   curl http://localhost:8080/health
+
+4. View logs:
+   kubectl logs -n {{ .Values.namespace.name }} -l app.kubernetes.io/component=ingestion
+   kubectl logs -n {{ .Values.namespace.name }} -l app.kubernetes.io/component=aggregation
+   kubectl logs -n {{ .Values.namespace.name }} -l app.kubernetes.io/component=query
+
+5. For monitoring (if enabled):
+   kubectl get servicemonitors -n {{ .Values.namespace.name }}
+
+Data persistence:
+- Ingestion data: PVC {{ include "weather-station.fullname" . }}-ingestion-data
+- Aggregation data: PVC {{ include "weather-station.fullname" . }}-aggregation-data
+- Query data: PVC {{ include "weather-station.fullname" . }}-query-data
