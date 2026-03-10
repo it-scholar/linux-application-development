@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,26 +32,31 @@ examples:
   # download all german stations
   test-harness retrieve --country de --start 2022-01-01
 
-  # parallel download with caching
-  test-harness retrieve --country us --parallel 8 --cache`,
+	# parallel download with caching
+  test-harness retrieve --country us --parallel 8 --cache
+
+  # overnight loading with rate limiting and disk space protection
+  test-harness retrieve --country us --limit 100000 --rate-limit 0.5 --min-free-space 5.0 --cache`,
 	RunE: runRetrieve,
 }
 
 var (
 	retrieveFlags struct {
-		station  string
-		country  string
-		lat      float64
-		lon      float64
-		radius   float64
-		start    string
-		end      string
-		limit    int
-		output   string
-		format   string
-		parallel int
-		cache    bool
-		cacheDir string
+		station        string
+		country        string
+		lat            float64
+		lon            float64
+		radius         float64
+		start          string
+		end            string
+		limit          int
+		output         string
+		format         string
+		parallel       int
+		cache          bool
+		cacheDir       string
+		rateLimit      float64
+		minFreeSpaceGB float64
 	}
 )
 
@@ -70,6 +76,8 @@ func init() {
 	retrieveCmd.Flags().IntVarP(&retrieveFlags.parallel, "parallel", "p", 4, "parallel downloads")
 	retrieveCmd.Flags().BoolVar(&retrieveFlags.cache, "cache", false, "use local cache")
 	retrieveCmd.Flags().StringVar(&retrieveFlags.cacheDir, "cache-dir", "", "cache directory (default ~/.cache/ws-test/noaa)")
+	retrieveCmd.Flags().Float64Var(&retrieveFlags.rateLimit, "rate-limit", 1.0, "requests per second (default 1.0, 0 = unlimited)")
+	retrieveCmd.Flags().Float64Var(&retrieveFlags.minFreeSpaceGB, "min-free-space", 1.0, "minimum free space in GB before stopping (default 1.0)")
 }
 
 func runRetrieve(cmd *cobra.Command, args []string) error {
@@ -124,11 +132,13 @@ func runRetrieve(cmd *cobra.Command, args []string) error {
 
 	// create noaa client
 	client := data.NewNOAAClient(data.NOAAOptions{
-		BaseURL:      "https://www.ncei.noaa.gov/data/global-historical-climatology-network-daily/access/",
-		CacheDir:     cacheDir,
-		CacheEnabled: retrieveFlags.cache,
-		Timeout:      30 * time.Second,
-		Parallel:     retrieveFlags.parallel,
+		BaseURL:        "https://www.ncei.noaa.gov/data/global-historical-climatology-network-daily/access/",
+		CacheDir:       cacheDir,
+		CacheEnabled:   retrieveFlags.cache,
+		Timeout:        30 * time.Second,
+		Parallel:       retrieveFlags.parallel,
+		RequestsPerSec: retrieveFlags.rateLimit,
+		MinFreeSpaceGB: retrieveFlags.minFreeSpaceGB,
 	})
 
 	// print header
@@ -137,6 +147,8 @@ func runRetrieve(cmd *cobra.Command, args []string) error {
 		"output_directory", retrieveFlags.output,
 		"parallel_downloads", retrieveFlags.parallel,
 		"cache_enabled", retrieveFlags.cache,
+		"rate_limit", fmt.Sprintf("%.1f req/s", retrieveFlags.rateLimit),
+		"min_free_space", fmt.Sprintf("%.1f GB", retrieveFlags.minFreeSpaceGB),
 	)
 
 	if retrieveFlags.cache {

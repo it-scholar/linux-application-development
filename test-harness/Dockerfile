@@ -1,44 +1,54 @@
-# Build stage
+# Multi-stage Dockerfile for Test Harness
+# Stage 1: Build
 FROM golang:1.21-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    git \
+    gcc \
+    musl-dev \
+    sqlite-dev \
+    make
 
 WORKDIR /build
 
-# Install build dependencies
-RUN apk add --no-cache git gcc musl-dev sqlite-dev
-
-# Copy go mod files
-COPY go.mod go.sum ./
+# Copy Go module files first for better caching
+COPY test-harness/go.mod test-harness/go.sum ./
 RUN go mod download
 
-# Copy source code
-COPY . .
+# Copy test harness source
+COPY test-harness/ .
 
-# Build the binary
-RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o test-harness ./cmd/harness
+# Build
+RUN make build
 
-# Runtime stage
-FROM alpine:3.18
-
-WORKDIR /app
+# Stage 2: Runtime
+FROM alpine:3.19
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates sqlite-libs
+RUN apk add --no-cache \
+    ca-certificates \
+    sqlite-libs \
+    curl \
+    jq
+
+# Create non-root user
+RUN addgroup -g 1000 weather && \
+    adduser -u 1000 -G weather -s /bin/sh -D weather
 
 # Copy binary from builder
-COPY --from=builder /build/test-harness /usr/local/bin/test-harness
+COPY --from=builder /build/bin/test-harness /usr/local/bin/test-harness
 
-# Create directories for reports and data
-RUN mkdir -p /app/reports /app/data
+# Copy config files
+COPY --from=builder /build/config/ /etc/weather-station/
 
-# Set environment variables
-ENV TEST_HARNESS_DATA_DIR=/app/data
-ENV TEST_HARNESS_REPORTS_DIR=/app/reports
+# Copy test files
+COPY --from=builder /build/tests/ /opt/weather-station/tests/
 
-# Run as non-root user
-RUN adduser -D -u 1000 testuser && \
-    chown -R testuser:testuser /app
-USER testuser
+WORKDIR /opt/weather-station
 
-# Default command
+USER weather
+
+# Default command runs CI pipeline against cluster services
 ENTRYPOINT ["test-harness"]
-CMD ["--help"]
+CMD ["ci", "--verbose"]
