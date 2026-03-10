@@ -274,7 +274,31 @@ docker exec -it ws-query sqlite3 /var/lib/ws/weather.db
 **prerequisites:**
 - kubernetes 1.20+
 - kubectl configured
-- helm 3 (optional)
+- helm 3 (recommended)
+- docker (for building images)
+
+**deploy with helm (recommended):**
+
+```bash
+# build docker images
+docker-compose build
+
+# tag images for kubernetes
+docker tag linux-application-development-ingestion:latest weather-station-ingestion:latest
+docker tag linux-application-development-aggregation:latest weather-station-aggregation:latest
+docker tag linux-application-development-query:latest weather-station-query:latest
+docker tag linux-application-development-discovery:latest weather-station-discovery:latest
+
+# deploy with helm
+helm install weather-station charts/weather-station \
+  --namespace weather-station \
+  --create-namespace \
+  --set global.imagePullPolicy=Never
+
+# verify deployment
+kubectl get pods -n weather-station
+kubectl logs -n weather-station -l app.kubernetes.io/component=ingestion
+```
 
 **deploy with kubectl:**
 
@@ -531,6 +555,193 @@ kubectl exec -it -n weather-station deployment/ws-query -- /bin/sh
 
 # debug pod
 kubectl run debug --rm -i --tty --image=nicolaka/netshoot -- /bin/bash
+```
+
+---
+
+## loading noaa weather data
+
+### overview
+
+the weather station system can ingest real weather data from noaa's global historical climatology network (ghcn-daily). the test-harness provides a convenient way to download and prepare this data for ingestion.
+
+### prerequisites
+
+- test-harness built and available
+- kubernetes cluster running with ingestion service
+- sufficient disk space (5-10 gb recommended for testing)
+
+### downloading noaa data
+
+**basic usage:**
+
+```bash
+# download data for a specific station
+test-harness retrieve --station USW00014739 --output ./data/csv
+
+# download data for all stations in a country (e.g., germany)
+test-harness retrieve --country GM --limit 100 --output ./data/csv
+
+# download with date range
+test-harness retrieve --country US --start 2024-01-01 --end 2024-12-31
+
+# download with rate limiting (recommended for large datasets)
+test-harness retrieve --country GM --limit 1000 \
+  --rate-limit 1.0 \
+  --min-free-space 5.0 \
+  --output ./data/csv \
+  --cache
+```
+
+**data retrieval options:**
+
+| flag | description | default |
+|------|-------------|---------|
+| `--station` | specific station id | - |
+| `--country` | country code (e.g., us, de, gm) | - |
+| `--lat/--lon` | latitude/longitude for radius search | - |
+| `--radius` | search radius in km | 50 |
+| `--start` | start date (yyyy-mm-dd) | - |
+| `--end` | end date (yyyy-mm-dd) | - |
+| `--limit` | max stations to download | 10000 |
+| `--rate-limit` | requests per second | 1.0 |
+| `--min-free-space` | minimum free space in gb | 1.0 |
+| `--output` | output directory | ./data/csv |
+| `--cache` | enable local caching | false |
+
+### data format
+
+noaa data is automatically converted to the expected csv format:
+
+```csv
+station_id,date,element,value,mflag,qflag,sflag
+USW00014739,20240101,TMAX,55,,,
+USW00014739,20240101,TMIN,32,,,
+USW00014739,20240101,PRCP,0,,,
+```
+
+**elements:**
+- `tmax` - maximum temperature (tenths of degrees c)
+- `tmin` - minimum temperature (tenths of degrees c)
+- `prcp` - precipitation (tenths of mm)
+- `snow` - snowfall (mm)
+- `snwd` - snow depth (mm)
+- `awnd` - average wind speed
+
+### loading data into kubernetes
+
+**step 1: download data locally**
+
+```bash
+# create output directory
+mkdir -p /tmp/noaa-data
+
+# download station data
+test-harness retrieve \
+  --station USW00014739 \
+  --rate-limit 2.0 \
+  --output /tmp/noaa-data
+
+# or download multiple stations
+test-harness retrieve \
+  --country GM \
+  --limit 50 \
+  --rate-limit 1.0 \
+  --output /tmp/noaa-data
+```
+
+**step 2: copy to ingestion pod**
+
+```bash
+# find ingestion pod
+kubectl get pods -n weather-station -l app.kubernetes.io/component=ingestion
+
+# copy csv files to pod
+kubectl cp /tmp/noaa-data/ weather-station/<ingestion-pod-name>:/data/csv/
+
+# verify files are in place
+kubectl exec -n weather-station <ingestion-pod-name> -- ls -lh /data/csv/
+```
+
+**step 3: verify ingestion**
+
+```bash
+# check ingestion logs
+kubectl logs -n weather-station -l app.kubernetes.io/component=ingestion --tail=20
+
+# check data stats via api
+kubectl port-forward -n weather-station svc/weather-station-ingestion 8081:8080
+curl http://localhost:8081/api/v1/stats
+```
+
+**expected output:**
+```json
+{"total_records": 448594}
+```
+
+**step 4: verify aggregation**
+
+```bash
+# check aggregation logs
+kubectl logs -n weather-station -l app.kubernetes.io/component=aggregation --tail=10
+
+# wait for aggregation cycle (runs every 5 minutes)
+sleep 300
+
+# query aggregated data
+kubectl port-forward -n weather-station svc/weather-station-query 8080:8080
+curl http://localhost:8080/api/v1/stations
+curl "http://localhost:8080/api/v1/weather/daily?station=USW00014739"
+```
+
+### overnight loading for large datasets
+
+for loading large datasets (5-10 gb) overnight without overwhelming noaa servers:
+
+```bash
+# download large dataset with conservative rate limiting
+test-harness retrieve \
+  --country US \
+  --limit 50000 \
+  --rate-limit 0.5 \
+  --min-free-space 10.0 \
+  --output ./data/csv \
+  --cache \
+  --cache-dir ~/.cache/ws-test/noaa
+
+# this will take several hours but is respectful to noaa's servers
+# at 0.5 req/sec, 50,000 stations = ~28 hours
+```
+
+**tips for large downloads:**
+- use `--cache` to avoid re-downloading if interrupted
+- use `--rate-limit 0.5` or lower to be nice to noaa
+- set `--min-free-space` to prevent disk full issues
+- run in screen/tmux session for overnight loading
+- monitor with `--verbose` flag
+
+## multi-station deployment
+
+for deploying multiple weather stations that can discover each other across kubernetes namespaces, see the [multi-station peer endpoints guide](multi_station_peer_endpoints.md).
+
+this allows:
+- cross-namespace peer discovery using fqdns
+- federated queries across multiple stations
+- geographic distribution of weather data
+- multi-tenant student environments
+
+### validation
+
+**run test-harness validation:**
+
+```bash
+# test all services
+test-harness test --suite integration
+
+# grade the deployment
+test-harness grade --detailed
+
+# expected result: b+ or higher (87.5%+)
 ```
 
 ---

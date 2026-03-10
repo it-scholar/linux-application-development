@@ -218,12 +218,82 @@ test-harness retrieve --country us --parallel 8 --cache --output ./training-data
 
 # small dataset for testing
 test-harness retrieve --limit 10000 --start 2024-01-01 --end 2024-12-31
+
+# overnight loading with rate limiting (recommended for large datasets)
+test-harness retrieve --country us --limit 100000 --rate-limit 0.5 --min-free-space 5.0 --cache
 ```
+
+see [deployment guide](../deployment/readme.md#loading-noaa-weather-data) for detailed instructions on loading data into kubernetes.
 
 **data source**: [noaa ghcn-daily](https://www.ncei.noaa.gov/data/global-historical-climatology-network-daily/access/)
 
 **includes**: temperature, precipitation, wind, pressure
 **coverage**: 1750-present, 100k+ stations worldwide
+
+## kubernetes deployment testing
+
+### validating kubernetes deployments
+
+after deploying to kubernetes, use the test-harness to validate the deployment:
+
+```bash
+# grade the deployment
+test-harness grade --detailed
+
+# run integration tests against kubernetes
+test-harness test --suite integration
+
+# test specific services
+test-harness test --service ingestion
+test-harness test --service aggregation
+test-harness test --service query
+```
+
+### expected results
+
+**grading output:**
+```
+=== weather station - final assessment ===
+student name: anonymous
+score points: 21 total: 24
+percentage value: 87.5%
+letter_grade value: B+
+status passed: true
+
+breakdown:
+  ✓ compilation: 10/10 (100.0%)
+  ✗ code_quality: 0/10 (0.0%) - not evaluated
+  ✓ functionality: 38/40 (95.0%)
+  ✓ performance: 18/20 (90.0%)
+  ✓ reliability: 15/15 (100.0%)
+```
+
+**pass criteria:**
+- overall score: 70%+ (C- or higher)
+- compilation: must pass (10/10)
+- functionality: 35+/40
+- reliability: 12+/15
+
+### manual validation
+
+```bash
+# setup port forwards
+kubectl port-forward svc/weather-station-ingestion 8081:8080 -n weather-station &
+kubectl port-forward svc/weather-station-aggregation 8082:8080 -n weather-station &
+kubectl port-forward svc/weather-station-query 8080:8080 -n weather-station &
+
+# test health endpoints
+curl http://localhost:8081/health  # ingestion
+curl http://localhost:8082/health  # aggregation
+curl http://localhost:8080/health  # query
+
+# test data ingestion
+curl http://localhost:8081/api/v1/stats
+
+# test query api
+curl http://localhost:8080/api/v1/stations
+curl "http://localhost:8080/api/v1/weather/daily?station=USW00014739"
+```
 
 ## ci/cd integration
 

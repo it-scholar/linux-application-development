@@ -31,6 +31,32 @@
 4. **day 4**: add networking, process management, mtls
 5. **day 5**: complete with threading, epoll, kubernetes
 
+### for kubernetes deployment
+
+**deploy to kubernetes:**
+```bash
+# build and deploy
+helm install weather-station charts/weather-station \
+  --namespace weather-station --create-namespace
+
+# verify
+kubectl get pods -n weather-station
+```
+
+**load noaa weather data:**
+```bash
+# download data
+test-harness retrieve --station USW00014739 --output ./data/csv
+
+# copy to kubernetes
+kubectl cp ./data/csv/ weather-station/<pod>:/data/csv/
+
+# validate deployment
+test-harness grade --detailed
+```
+
+see [deployment guide](deployment/readme.md) for complete instructions.
+
 ### for instructors
 
 see [instructor guide](operations/instructor_guide.md) for:

@@ -37,12 +37,17 @@ welcome to the weather station microservices documentation. this index will help
 ### deployment
 
 - **[deployment guides](deployment/readme.md)** - docker, kubernetes, systemd
+- **[kubernetes deployment](deployment/readme.md#kubernetes)** - complete kubernetes setup
+- **[loading noaa data](deployment/readme.md#loading-noaa-weather-data)** - download and ingest real weather data
+- **[helm deployment](deployment/readme.md#deploy-with-helm-recommended)** - helm chart installation
+- **[multi-station deployment](deployment/multi_station_peer_endpoints.md)** - federated multi-station setup with peer discovery
 
 ### testing
 
 - **[testing guide](testing/readme.md)** - go test harness overview and quick start
 - **[go test harness](testing/go_harness.md)** - detailed architecture and specification
 - **[data retrieval](testing/readme.md#data-retrieval)** - download real noaa weather data
+- **[kubernetes deployment testing](testing/readme.md#kubernetes-deployment-testing)** - validate kubernetes deployments
 - **[contract validation](testing/go_harness.md#1-validate)** - verify service contracts
 - **[performance testing](testing/go_harness.md#3-benchmark)** - throughput and latency benchmarks
 - **[chaos testing](testing/go_harness.md#4-chaos)** - resilience and failure testing
