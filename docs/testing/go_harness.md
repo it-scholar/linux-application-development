@@ -29,7 +29,8 @@ test-harness/
 │   │   ├── grade.go
 │   │   ├── mock.go
 │   │   ├── ci.go
-│   │   └── retrieve.go
+│   │   ├── retrieve.go
+│   │   └── generate.go
 │   │
 │   ├── data/                    # noaa data retrieval
 │   │   ├── noaa.go             # noaa ghcn-daily client
@@ -334,6 +335,42 @@ examples:
 output format:
   csv columns: station_id, date, temperature_max, temperature_min, 
                temperature_avg, precipitation, wind_speed, pressure
+```
+
+#### 9. generate - create synthetic weather CSV
+
+```bash
+test-harness generate [flags]
+
+description:
+  generate synthetic weather station CSV files for ingestion and load testing
+  each generated file covers 100 years of hourly UTC data per station
+  for larger target sizes, multiple station IDs are automatically included
+
+flags:
+      --size string          target file size for single file (e.g., 100MB, 1GB)
+      --sizes strings        batch target sizes (comma-separated)
+      --out string           output CSV path for single generation
+      --out-dir string       output directory for batch generation
+      --start string         start date in UTC (yyyy-mm-dd, default 1926-01-01)
+      --seed int             random seed (0 = time-based)
+      --tolerance float      allowed size variance percent (default 5.0)
+      --station-prefix string station id prefix (default FAKE)
+      --years int            years per station in each file (default 100)
+
+examples:
+  # generate one 1GB synthetic file
+  test-harness generate --size 1GB --out ./testdata/fake_1gb.csv
+
+  # generate multiple size tiers in one run
+  test-harness generate --sizes 100MB,1GB,5GB --out-dir ./testdata/generated
+
+  # deterministic output with fixed seed and start date
+  test-harness generate --size 500MB --out ./testdata/fake_500mb.csv --start 1950-01-01 --seed 42
+
+output format:
+  csv columns: timestamp,station_id,temperature_c,humidity_pct,pressure_hpa,
+               wind_speed_mps,wind_dir_deg,rain_mm,payload
 ```
 
 ## configuration
