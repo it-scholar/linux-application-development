@@ -160,7 +160,6 @@ func logGenerateResult(result data.GenerateResult) {
 		"actual_size", data.HumanByteSize(result.ActualBytes),
 		"rows", result.RowsWritten,
 		"stations", result.StationsUsed,
-		"payload_bytes_per_row", result.PayloadBytesPerRow,
 		"in_tolerance", result.InTolerance,
 	)
 }

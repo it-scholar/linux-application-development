@@ -370,7 +370,7 @@ examples:
 
 output format:
   csv columns: timestamp,station_id,temperature_c,humidity_pct,pressure_hpa,
-               wind_speed_mps,wind_dir_deg,rain_mm,payload
+               wind_speed_mps,wind_dir_deg,rain_mm
 ```
 
 ## configuration
