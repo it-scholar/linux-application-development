@@ -144,6 +144,8 @@ TEST-*.xml
 # =============================================================================
 # Data directories
 data/
+!test-harness/pkg/data/
+!test-harness/pkg/data/*.go
 *.csv
 *.dat
 *.db
