@@ -223,3 +223,4 @@ reports/
 *.key
 *.crt
 !test-harness/contracts/*.yaml
+services/cli/cli
