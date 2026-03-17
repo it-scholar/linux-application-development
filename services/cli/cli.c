@@ -23,7 +23,7 @@ typedef struct {
 
 /* Global config */
 static Config g_config = {
-    .api_endpoint = "http://localhost:8080",
+    .api_endpoint = "http://localhost:8081",
     .output_format = "table",
     .default_station = ""
 };
@@ -170,7 +170,7 @@ static int make_http_request(const char *path, char *response, size_t response_s
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    memcpy(&server_addr.sin_addr.s_addr, server->h_addr, server->h_length);
+    memcpy(&server_addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
     
     if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         fprintf(stderr, "Error: Could not connect to API at %s:%d\n", host, port);
