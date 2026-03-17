@@ -157,6 +157,51 @@ func (c *NOAAClient) GetStation(id string) (Station, error) {
 	return Station{}, fmt.Errorf("station %s not found", id)
 }
 
+// isoToFIPS maps ISO 3166-1 alpha-2 country codes to FIPS 10-4 codes used in NOAA station IDs.
+// Only entries that differ between the two standards are listed here.
+var isoToFIPS = map[string]string{
+	"de": "gm", // Germany
+	"pl": "pl", // Poland (same)
+	"tw": "ch", // Taiwan (listed under China in NOAA)
+	"gb": "uk", // United Kingdom
+	"kr": "ks", // South Korea
+	"kp": "kn", // North Korea
+	"bo": "bl", // Bolivia
+	"br": "br", // Brazil (same)
+	"by": "bo", // Belarus
+	"cz": "ez", // Czech Republic
+	"eg": "eg", // Egypt (same)
+	"gr": "gr", // Greece (same)
+	"hr": "hr", // Croatia (same)
+	"hu": "hu", // Hungary (same)
+	"il": "is", // Israel
+	"ir": "ir", // Iran (same)
+	"jo": "jo", // Jordan (same)
+	"ke": "ke", // Kenya (same)
+	"la": "la", // Laos (same)
+	"lb": "le", // Lebanon
+	"lk": "ce", // Sri Lanka
+	"ly": "ly", // Libya (same)
+	"ma": "mo", // Morocco
+	"mm": "bm", // Myanmar/Burma
+	"np": "np", // Nepal (same)
+	"nz": "nz", // New Zealand (same)
+	"ph": "rp", // Philippines
+	"pk": "pk", // Pakistan (same)
+	"ro": "ro", // Romania (same)
+	"rs": "ri", // Serbia
+	"sa": "sa", // Saudi Arabia (same)
+	"sk": "lo", // Slovakia
+	"sy": "sy", // Syria (same)
+	"th": "th", // Thailand (same)
+	"tz": "tz", // Tanzania (same)
+	"ua": "up", // Ukraine
+	"vn": "vm", // Vietnam
+	"ye": "ym", // Yemen
+	"zm": "za", // Zambia
+	"zw": "zi", // Zimbabwe
+}
+
 // get all stations for a country
 func (c *NOAAClient) GetStationsByCountry(countryCode string) ([]Station, error) {
 	stations, err := c.loadStations()
@@ -164,9 +209,15 @@ func (c *NOAAClient) GetStationsByCountry(countryCode string) ([]Station, error)
 		return nil, err
 	}
 
+	// resolve ISO code to FIPS if needed
+	lookup := strings.ToLower(countryCode)
+	if fips, ok := isoToFIPS[lookup]; ok {
+		lookup = fips
+	}
+
 	var result []Station
 	for _, s := range stations {
-		if strings.EqualFold(s.Country, countryCode) {
+		if strings.EqualFold(s.Country, lookup) {
 			result = append(result, s)
 		}
 	}
