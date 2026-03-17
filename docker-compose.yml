@@ -53,7 +53,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - query-data:/data
+      - aggregation-data:/data:ro
     environment:
       - LOG_LEVEL=info
     depends_on:
