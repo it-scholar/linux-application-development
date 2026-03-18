@@ -8,7 +8,7 @@ services:
       dockerfile: services/ingestion/Dockerfile
     container_name: weather-station-ingestion
     volumes:
-      - ingestion-data:/data
+      - ./data:/data
     environment:
       - LOG_LEVEL=info
     healthcheck:
@@ -112,8 +112,6 @@ services:
       - test
 
 volumes:
-  ingestion-data:
-    driver: local
   aggregation-data:
     driver: local
   query-data:
@@ -124,6 +122,3 @@ volumes:
 networks:
   weather-station:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16

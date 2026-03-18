@@ -34,6 +34,13 @@ typedef struct {
     int api_port;
 } IngestionConfig;
 
+typedef struct ProcessedFileInfo {
+    char filepath[512];
+    time_t mtime;
+    off_t size;
+    struct ProcessedFileInfo *next;
+} ProcessedFileInfo;
+
 /* Global state */
 typedef struct {
     IngestionConfig config;
@@ -41,6 +48,7 @@ typedef struct {
     int server_socket;
     Logger logger;
     DaemonState daemon;
+    ProcessedFileInfo *processed_files;
 } IngestionState;
 
 static IngestionState g_state = {0};
@@ -62,6 +70,11 @@ static int start_api_server(void);
 static void handle_api_request(int client_socket);
 static void send_http_response(int client_socket, HttpResponse *response);
 static const char *get_status_text(int code);
+static ProcessedFileInfo *find_processed_file(const char *filepath);
+static int should_process_file(const char *filepath, time_t mtime, off_t size);
+static int mark_file_processed(const char *filepath, time_t mtime, off_t size);
+static int load_processed_files_from_db(void);
+static void free_processed_files(void);
 
 /* Configuration handler callback */
 static int parse_config_handler(const char *key, const char *value, void *user_data) {
@@ -138,6 +151,21 @@ static int init_database(const char *db_path) {
             sqlite3_free(err_msg);
         }
     }
+
+    const char *create_processed_files_sql =
+        "CREATE TABLE IF NOT EXISTS processed_files ("
+        "filepath TEXT PRIMARY KEY,"
+        "mtime INTEGER NOT NULL,"
+        "size INTEGER NOT NULL,"
+        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        ");";
+
+    rc = sqlite3_exec(g_state.db, create_processed_files_sql, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR(&g_state.logger, "SQL error creating processed_files table: %s", err_msg);
+        sqlite3_free(err_msg);
+        return -1;
+    }
     
     LOG_INFO(&g_state.logger, "Database initialized: %s", db_path);
     return 0;
@@ -154,9 +182,13 @@ static int ingest_csv_file(const char *filepath) {
     LOG_INFO(&g_state.logger, "Ingesting file: %s", filepath);
     
     /* Prepare insert statement */
-    const char *insert_sql = 
+    const char *insert_sql =
         "INSERT INTO weather_data (station_id, date, element, value, mflag, qflag, sflag) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?);";
+        "SELECT ?, ?, ?, ?, ?, ?, ? "
+        "WHERE NOT EXISTS ("
+        "SELECT 1 FROM weather_data WHERE station_id = ? AND date = ? AND element = ? AND value = ? "
+        "AND COALESCE(mflag, '') = ? AND COALESCE(qflag, '') = ? AND COALESCE(sflag, '') = ?"
+        ");";
     
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(g_state.db, insert_sql, -1, &stmt, NULL);
@@ -172,6 +204,7 @@ static int ingest_csv_file(const char *filepath) {
     char line[BUFFER_SIZE];
     int line_count = 0;
     int inserted_count = 0;
+    int duplicate_count = 0;
     int error_count = 0;
     
     /* Skip header if present */
@@ -198,15 +231,29 @@ static int ingest_csv_file(const char *filepath) {
             error_count++;
             continue;
         }
+
+        const char *mflag_insert = mflag[0] ? mflag : NULL;
+        const char *qflag_insert = qflag[0] ? qflag : NULL;
+        const char *sflag_insert = sflag[0] ? sflag : NULL;
+        const char *mflag_compare = mflag[0] ? mflag : "";
+        const char *qflag_compare = qflag[0] ? qflag : "";
+        const char *sflag_compare = sflag[0] ? sflag : "";
         
         /* Bind parameters */
         sqlite3_bind_text(stmt, 1, station_id, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, date, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 3, element, -1, SQLITE_STATIC);
         sqlite3_bind_double(stmt, 4, value);
-        sqlite3_bind_text(stmt, 5, mflag[0] ? mflag : NULL, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 6, qflag[0] ? qflag : NULL, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 7, sflag[0] ? sflag : NULL, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 5, mflag_insert, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 6, qflag_insert, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 7, sflag_insert, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 8, station_id, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 9, date, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 10, element, -1, SQLITE_STATIC);
+        sqlite3_bind_double(stmt, 11, value);
+        sqlite3_bind_text(stmt, 12, mflag_compare, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 13, qflag_compare, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 14, sflag_compare, -1, SQLITE_STATIC);
         
         /* Execute */
         rc = sqlite3_step(stmt);
@@ -214,7 +261,11 @@ static int ingest_csv_file(const char *filepath) {
             LOG_WARN(&g_state.logger, "Failed to insert line %d: %s", line_count, sqlite3_errmsg(g_state.db));
             error_count++;
         } else {
-            inserted_count++;
+            if (sqlite3_changes(g_state.db) > 0) {
+                inserted_count++;
+            } else {
+                duplicate_count++;
+            }
         }
         
         /* Reset for next iteration */
@@ -228,10 +279,138 @@ static int ingest_csv_file(const char *filepath) {
     sqlite3_finalize(stmt);
     fclose(fp);
     
-    LOG_INFO(&g_state.logger, "File %s processed: %d lines, %d inserted, %d errors",
-                filepath, line_count, inserted_count, error_count);
+    LOG_INFO(&g_state.logger, "File %s processed: %d lines, %d inserted, %d duplicates skipped, %d errors",
+                filepath, line_count, inserted_count, duplicate_count, error_count);
     
     return (error_count > 0) ? -1 : 0;
+}
+
+static ProcessedFileInfo *find_processed_file(const char *filepath) {
+    ProcessedFileInfo *current = g_state.processed_files;
+    while (current) {
+        if (strcmp(current->filepath, filepath) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+static int should_process_file(const char *filepath, time_t mtime, off_t size) {
+    ProcessedFileInfo *info = find_processed_file(filepath);
+    if (!info) {
+        return 1;
+    }
+
+    if (info->mtime != mtime || info->size != size) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int mark_file_processed(const char *filepath, time_t mtime, off_t size) {
+    ProcessedFileInfo *info = find_processed_file(filepath);
+    if (!info) {
+        info = (ProcessedFileInfo *)malloc(sizeof(ProcessedFileInfo));
+        if (!info) {
+            LOG_ERROR(&g_state.logger, "Failed to allocate processed file tracker for %s", filepath);
+            return -1;
+        }
+        memset(info, 0, sizeof(ProcessedFileInfo));
+        SAFE_STRCPY(info->filepath, filepath, sizeof(info->filepath));
+        info->next = g_state.processed_files;
+        g_state.processed_files = info;
+    }
+
+    info->mtime = mtime;
+    info->size = size;
+
+    const char *upsert_sql =
+        "INSERT INTO processed_files (filepath, mtime, size, updated_at) "
+        "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(filepath) DO UPDATE SET "
+        "mtime = excluded.mtime, "
+        "size = excluded.size, "
+        "updated_at = CURRENT_TIMESTAMP;";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(g_state.db, upsert_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR(&g_state.logger, "Failed to prepare processed_files upsert: %s", sqlite3_errmsg(g_state.db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, filepath, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)mtime);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)size);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR(&g_state.logger, "Failed to persist processed file metadata for %s: %s",
+                  filepath, sqlite3_errmsg(g_state.db));
+        return -1;
+    }
+
+    return 0;
+}
+
+static int load_processed_files_from_db(void) {
+    const char *sql = "SELECT filepath, mtime, size FROM processed_files";
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(g_state.db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR(&g_state.logger, "Failed to prepare processed_files load query: %s", sqlite3_errmsg(g_state.db));
+        return -1;
+    }
+
+    int loaded = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *filepath = (const char *)sqlite3_column_text(stmt, 0);
+        time_t mtime = (time_t)sqlite3_column_int64(stmt, 1);
+        off_t size = (off_t)sqlite3_column_int64(stmt, 2);
+
+        if (!filepath || filepath[0] == '\0') {
+            continue;
+        }
+
+        ProcessedFileInfo *info = (ProcessedFileInfo *)malloc(sizeof(ProcessedFileInfo));
+        if (!info) {
+            LOG_ERROR(&g_state.logger, "Out of memory while loading processed file metadata");
+            sqlite3_finalize(stmt);
+            return -1;
+        }
+
+        memset(info, 0, sizeof(ProcessedFileInfo));
+        SAFE_STRCPY(info->filepath, filepath, sizeof(info->filepath));
+        info->mtime = mtime;
+        info->size = size;
+        info->next = g_state.processed_files;
+        g_state.processed_files = info;
+        loaded++;
+    }
+
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR(&g_state.logger, "Failed while reading processed_files rows: %s", sqlite3_errmsg(g_state.db));
+        return -1;
+    }
+
+    LOG_INFO(&g_state.logger, "Loaded %d processed file metadata entries", loaded);
+    return 0;
+}
+
+static void free_processed_files(void) {
+    ProcessedFileInfo *current = g_state.processed_files;
+    while (current) {
+        ProcessedFileInfo *next = current->next;
+        free(current);
+        current = next;
+    }
+    g_state.processed_files = NULL;
 }
 
 /* Process all CSV files in directory */
@@ -246,9 +425,23 @@ static void process_csv_files(void) {
                 char filepath[512];
                 snprintf(filepath, sizeof(filepath), "%s/%s",
                         g_state.config.csv_directory, entry->d_name);
-                
-                /* Process file */
-                ingest_csv_file(filepath);
+
+                struct stat st;
+                if (stat(filepath, &st) != 0) {
+                    LOG_WARN(&g_state.logger, "Cannot stat CSV file %s: %s", filepath, strerror(errno));
+                    continue;
+                }
+
+                if (!should_process_file(filepath, st.st_mtime, st.st_size)) {
+                    LOG_DEBUG(&g_state.logger, "Skipping unchanged file: %s", filepath);
+                    continue;
+                }
+
+                if (ingest_csv_file(filepath) == 0) {
+                    if (mark_file_processed(filepath, st.st_mtime, st.st_size) != 0) {
+                        LOG_WARN(&g_state.logger, "Ingested %s but failed to persist file tracking metadata", filepath);
+                    }
+                }
             }
         }
         closedir(dir);
@@ -514,6 +707,7 @@ static void cleanup(void) {
     }
     
     daemon_cleanup(&g_state.daemon);
+    free_processed_files();
     logger_close(&g_state.logger);
 }
 
@@ -584,6 +778,11 @@ int main(int argc, char *const argv[]) {
     
     /* Initialize database */
     if (init_database(g_state.config.database_path) != 0) {
+        cleanup();
+        return 1;
+    }
+
+    if (load_processed_files_from_db() != 0) {
         cleanup();
         return 1;
     }
