@@ -55,11 +55,29 @@ static int http_get_with_retry(const char *url, char **response_buffer);
 static size_t write_callback(const void *contents, size_t size, size_t nmemb, void *userp);
 static int start_api_server(void);
 static void cleanup(void);
+static void clear_response_buffer(char **response_buffer);
+
+static void clear_response_buffer(char **response_buffer) {
+    if (!response_buffer || !*response_buffer) {
+        return;
+    }
+
+    free(*response_buffer);
+    *response_buffer = NULL;
+}
 
 static size_t write_callback(const void *contents, size_t size, size_t nmemb, void *userp) {
     size_t total_size = size * nmemb;
     char **response = (char **)userp;
     size_t current_len = *response ? strlen(*response) : 0;
+
+    if (current_len + total_size > MAX_RESPONSE_SIZE) {
+        LOG_ERROR(&g_state.logger,
+                 "HTTP response too large (%zu bytes), max allowed is %d bytes",
+                 current_len + total_size, MAX_RESPONSE_SIZE);
+        return 0;
+    }
+
     char *new_response = realloc(*response, current_len + total_size + 1);
     if (!new_response) return 0;
     *response = new_response;
@@ -80,6 +98,8 @@ static int http_get_with_retry(const char *url, char **response_buffer) {
     }
     
     while (retries < MAX_RETRIES) {
+        clear_response_buffer(response_buffer);
+
         curl_easy_reset(g_state.curl);
         curl_easy_setopt(g_state.curl, CURLOPT_URL, url);
         curl_easy_setopt(g_state.curl, CURLOPT_WRITEFUNCTION, write_callback);
@@ -117,13 +137,10 @@ static int http_get_with_retry(const char *url, char **response_buffer) {
             delay_ms = delay_ms - jitter + (rand() % (2 * jitter + 1));
         }
         
-        if (response_buffer) {
-            free(response_buffer);
-            response_buffer = NULL;
-        }
+        clear_response_buffer(response_buffer);
     }
     
-    if (response_buffer) free(response_buffer);
+    clear_response_buffer(response_buffer);
     LOG_ERROR(&g_state.logger, "HTTP GET failed after %d retries: %s", MAX_RETRIES, url);
     return -1;
 }
@@ -317,10 +334,13 @@ static int fetch_and_aggregate(void) {
                  offset, chunk_count, records_processed);
         
         /* Check if there are more records */
-        if (chunk_count < limit || records_processed >= total_records) {
+        if (chunk_count <= 0) {
             has_more = 0;
         } else {
-            offset += limit;
+            offset += chunk_count;
+            if (total_records > 0 && offset >= total_records) {
+                has_more = 0;
+            }
         }
     }
     
@@ -388,10 +408,14 @@ static void handle_api_request(int client_socket) {
     }
     
     char response[1024];
+    char body[256];
+    int body_len;
     if (strcmp(path, "/health") == 0) {
-        snprintf(response, sizeof(response),
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n"
+        body_len = snprintf(body, sizeof(body),
             "{\"status\": \"healthy\", \"version\": \"%s\"}", VERSION);
+        snprintf(response, sizeof(response),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+            "%s", body_len, body);
     } else {
         snprintf(response, sizeof(response),
             "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 25\r\nConnection: close\r\n\r\n"
