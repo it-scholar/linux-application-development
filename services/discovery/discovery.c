@@ -717,7 +717,7 @@ int main(int argc, char *const argv[]) {
     }
     
     /* Initialize daemon state */
-    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, cleanup);
+    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, NULL);
 
     pthread_mutex_init(&g_state.state_mutex, NULL);
     

@@ -810,7 +810,7 @@ int main(int argc, char *const argv[]) {
     }
     
     /* Initialize daemon state */
-    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, cleanup);
+    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, NULL);
     
     /* Setup signal handlers */
     daemon_setup_signals(&g_state.daemon);

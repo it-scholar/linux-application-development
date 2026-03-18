@@ -540,7 +540,7 @@ int main(int argc, char *const argv[]) {
         }
     }
     
-    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, cleanup);
+    daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, NULL);
     daemon_setup_signals(&g_state.daemon);
     
     if (init_output_database(g_state.config.output_database) != 0) {
