@@ -74,6 +74,7 @@ static void handle_api_request(int client_socket);
 static void handle_pending_api_connections(void);
 static void *api_server_thread(void *arg);
 static void send_http_response(int client_socket, HttpResponse *response);
+static void send_http_response_body(int client_socket, int status_code, const char *content_type, const char *body);
 static const char *get_status_text(int code);
 static ProcessedFileInfo *find_processed_file(const char *filepath);
 static int should_process_file(const char *filepath, time_t mtime, off_t size);
@@ -608,19 +609,22 @@ static void handle_api_request(int client_socket) {
         sqlite3_stmt *stmt;
         int rc = sqlite3_prepare_v2(g_state.db, sql, -1, &stmt, NULL);
         if (rc != SQLITE_OK) {
-            HttpResponse response; 
-            response.status_code = 500; 
-            response.content_type = "application/json"; 
-            strncpy(response.body, "{\"error\": \"Database error\"}", BUFFER_SIZE - 1); 
-            response.body[BUFFER_SIZE - 1] = '\0';
-            send_http_response(client_socket, &response);
+            send_http_response_body(client_socket, 500, "application/json", "{\"error\": \"Database error\"}");
         } else {
-            char json[BUFFER_SIZE];
-            int pos = snprintf(json, sizeof(json), "{\"data\": [");
+            size_t json_capacity = 16384;
+            char *json = (char *)malloc(json_capacity);
+            if (json == NULL) {
+                sqlite3_finalize(stmt);
+                send_http_response_body(client_socket, 500, "application/json", "{\"error\": \"Out of memory\"}");
+                close(client_socket);
+                return;
+            }
+
+            size_t pos = (size_t)snprintf(json, json_capacity, "{\"data\": [");
             int first = 1;
             int record_count = 0;
             
-            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW && pos < BUFFER_SIZE - 512) {
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
                 const char *station_id = (const char *)sqlite3_column_text(stmt, 0);
                 const char *date = (const char *)sqlite3_column_text(stmt, 1);
                 const char *element = (const char *)sqlite3_column_text(stmt, 2);
@@ -628,17 +632,45 @@ static void handle_api_request(int client_socket) {
                 const char *mflag = (const char *)sqlite3_column_text(stmt, 4);
                 const char *qflag = (const char *)sqlite3_column_text(stmt, 5);
                 const char *sflag = (const char *)sqlite3_column_text(stmt, 6);
+
+                char row[512];
+                int row_len = snprintf(row, sizeof(row),
+                                       "%s{\"station_id\":\"%s\",\"date\":\"%s\",\"element\":\"%s\","
+                                       "\"value\":%.2f,\"mflag\":\"%s\",\"qflag\":\"%s\",\"sflag\":\"%s\"}",
+                                       first ? "" : ",",
+                                       station_id ? station_id : "",
+                                       date ? date : "",
+                                       element ? element : "",
+                                       value,
+                                       mflag ? mflag : "",
+                                       qflag ? qflag : "",
+                                       sflag ? sflag : "");
+
+                if (row_len < 0) {
+                    sqlite3_finalize(stmt);
+                    free(json);
+                    send_http_response_body(client_socket, 500, "application/json", "{\"error\": \"Serialization error\"}");
+                    close(client_socket);
+                    return;
+                }
+
+                while (pos + (size_t)row_len + 128 >= json_capacity) {
+                    size_t new_capacity = json_capacity * 2;
+                    char *grown = (char *)realloc(json, new_capacity);
+                    if (grown == NULL) {
+                        sqlite3_finalize(stmt);
+                        free(json);
+                        send_http_response_body(client_socket, 500, "application/json", "{\"error\": \"Out of memory\"}");
+                        close(client_socket);
+                        return;
+                    }
+                    json = grown;
+                    json_capacity = new_capacity;
+                }
                 
-                pos += snprintf(json + pos, sizeof(json) - pos, "%s{\"station_id\":\"%s\",\"date\":\"%s\",\"element\":\"%s\","
-                               "\"value\":%.2f,\"mflag\":\"%s\",\"qflag\":\"%s\",\"sflag\":\"%s\"}",
-                               first ? "" : ",",
-                               station_id ? station_id : "",
-                               date ? date : "",
-                               element ? element : "",
-                               value,
-                               mflag ? mflag : "",
-                               qflag ? qflag : "",
-                               sflag ? sflag : "");
+                memcpy(json + pos, row, (size_t)row_len);
+                pos += (size_t)row_len;
+                json[pos] = '\0';
                 
                 first = 0;
                 record_count++;
@@ -656,16 +688,25 @@ static void handle_api_request(int client_socket) {
                 }
                 sqlite3_finalize(count_stmt);
             }
+
+            while (pos + 128 >= json_capacity) {
+                size_t new_capacity = json_capacity * 2;
+                char *grown = (char *)realloc(json, new_capacity);
+                if (grown == NULL) {
+                    free(json);
+                    send_http_response_body(client_socket, 500, "application/json", "{\"error\": \"Out of memory\"}");
+                    close(client_socket);
+                    return;
+                }
+                json = grown;
+                json_capacity = new_capacity;
+            }
             
-            snprintf(json + pos, sizeof(json) - pos, "],\"offset\":%d,\"limit\":%d,\"total\":%d,\"count\":%d}",
+            snprintf(json + pos, json_capacity - pos, "],\"offset\":%d,\"limit\":%d,\"total\":%d,\"count\":%d}",
                      offset, limit, total_count, record_count);
-            
-            HttpResponse response;
-            response.status_code = 200;
-            response.content_type = "application/json";
-            strncpy(response.body, json, BUFFER_SIZE - 1);
-            response.body[BUFFER_SIZE - 1] = '\0';
-            send_http_response(client_socket, &response);
+
+            send_http_response_body(client_socket, 200, "application/json", json);
+            free(json);
         }
     } else if (strcmp(path, "/api/v1/stats") == 0) {
         /* Return statistics */
@@ -698,6 +739,13 @@ static void handle_api_request(int client_socket) {
 
 /* Send HTTP response */
 static void send_http_response(int client_socket, HttpResponse *response) {
+    send_http_response_body(client_socket,
+                            response->status_code,
+                            response->content_type,
+                            response->body);
+}
+
+static void send_http_response_body(int client_socket, int status_code, const char *content_type, const char *body) {
     char headers[512];
     int header_len = snprintf(headers, sizeof(headers),
                               "HTTP/1.1 %d %s\r\n"
@@ -705,13 +753,13 @@ static void send_http_response(int client_socket, HttpResponse *response) {
                               "Content-Length: %zu\r\n"
                               "Connection: close\r\n"
                               "\r\n",
-                              response->status_code,
-                              get_status_text(response->status_code),
-                              response->content_type,
-                              strlen(response->body));
+                              status_code,
+                              get_status_text(status_code),
+                              content_type,
+                              strlen(body));
     
     send(client_socket, headers, header_len, 0);
-    send(client_socket, response->body, strlen(response->body), 0);
+    send(client_socket, body, strlen(body), 0);
 }
 
 /* Get HTTP status text */
