@@ -16,22 +16,21 @@ RUN gcc -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L \
 
 FROM alpine:3.19
 
-RUN apk add --no-cache sqlite-libs && \
+RUN apk add --no-cache sqlite-libs su-exec && \
     addgroup -g 1000 weather && \
     adduser -u 1000 -G weather -s /bin/sh -D weather
 
 COPY --from=builder /build/ingestion /usr/local/bin/ingestion
 COPY --from=builder /build/ingestion.ini /etc/weather-station/ingestion.ini
+COPY services/ingestion/entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# Create both data and csv directories
+# Create both data and csv directories (ownership fixed at runtime by entrypoint)
 RUN mkdir -p /data/csv /data/processed && \
-    chown -R weather:weather /data
-
-USER weather
+    chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 8080
 
 VOLUME ["/data"]
 
-ENTRYPOINT ["ingestion"]
-CMD ["--config", "/etc/weather-station/ingestion.ini"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["ingestion", "--config", "/etc/weather-station/ingestion.ini"]
