@@ -10,6 +10,8 @@
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
+#include <stdarg.h>
+#include <pthread.h>
 #include <sqlite3.h>
 
 /* Shared library headers */
@@ -38,6 +40,8 @@ typedef struct {
     int server_socket;
     Logger logger;
     DaemonState daemon;
+    pthread_t api_thread;
+    int api_thread_started;
 } QueryState;
 
 static QueryState g_state = {0};
@@ -54,6 +58,8 @@ static int parse_config_handler(const char *key, const char *value, void *user_d
 static int init_database(const char *db_path);
 static int start_server(void);
 static void handle_request(int client_socket);
+static void handle_pending_connections(void);
+static void *api_server_thread(void *arg);
 static void handle_health_check(int client_socket);
 static void handle_daily_query(int client_socket, const char *query_string);
 static void handle_hourly_query(int client_socket, const char *query_string);
@@ -62,6 +68,25 @@ static void send_http_response(int client_socket, HttpResponse *response);
 static const char *get_status_text(int code);
 static char *url_decode(const char *str);
 static void cleanup(void);
+static int append_json(char *buffer, size_t buffer_size, int *pos, const char *fmt, ...);
+
+static int append_json(char *buffer, size_t buffer_size, int *pos, const char *fmt, ...) {
+    if (!buffer || !pos || *pos < 0 || (size_t)*pos >= buffer_size) {
+        return -1;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buffer + *pos, buffer_size - (size_t)*pos, fmt, args);
+    va_end(args);
+
+    if (written < 0 || (size_t)written >= buffer_size - (size_t)*pos) {
+        return -1;
+    }
+
+    *pos += written;
+    return 0;
+}
 
 /* Configuration handler callback */
 static int parse_config_handler(const char *key, const char *value, void *user_data) {
@@ -151,6 +176,36 @@ static int start_server(void) {
     return 0;
 }
 
+static void handle_pending_connections(void) {
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+
+    while (1) {
+        int client_socket = accept(g_state.server_socket, (struct sockaddr *)&client_addr, &addr_len);
+
+        if (client_socket < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+
+            LOG_ERROR(&g_state.logger, "Accept failed: %s", strerror(errno));
+            break;
+        }
+
+        handle_request(client_socket);
+        addr_len = sizeof(client_addr);
+    }
+}
+
+static void *api_server_thread(void *arg __attribute__((unused))) {
+    while (!daemon_should_stop(&g_state.daemon) && g_state.server_socket >= 0) {
+        handle_pending_connections();
+        usleep(10000); /* 10ms */
+    }
+
+    return NULL;
+}
+
 /* Handle HTTP request */
 static void handle_request(int client_socket) {
     char buffer[MAX_REQUEST_SIZE];
@@ -216,12 +271,31 @@ static void handle_daily_query(int client_socket, const char *query_string) {
     /* Parse query parameters */
     if (query_string) {
         char *query = strdup(query_string);
+        if (!query) {
+            HttpResponse response;
+            response.status_code = 500;
+            response.content_type = "application/json";
+            strncpy(response.body, "{\"error\": \"Memory allocation failed\"}", BUFFER_SIZE - 1);
+            response.body[BUFFER_SIZE - 1] = '\0';
+            send_http_response(client_socket, &response);
+            return;
+        }
         char *param = strtok(query, "&");
         while (param) {
             char *eq = strchr(param, '=');
             if (eq) {
                 *eq = '\0';
                 char *value = url_decode(eq + 1);
+                if (!value) {
+                    free(query);
+                    HttpResponse response;
+                    response.status_code = 500;
+                    response.content_type = "application/json";
+                    strncpy(response.body, "{\"error\": \"Memory allocation failed\"}", BUFFER_SIZE - 1);
+                    response.body[BUFFER_SIZE - 1] = '\0';
+                    send_http_response(client_socket, &response);
+                    return;
+                }
                 if (strcmp(param, "station_id") == 0) {
                     strncpy(station_id, value, sizeof(station_id) - 1);
                 } else if (strcmp(param, "date") == 0) {
@@ -238,20 +312,39 @@ static void handle_daily_query(int client_socket, const char *query_string) {
     
     /* Build query */
     char sql[512];
-    snprintf(sql, sizeof(sql),
-             "SELECT station_id, date, metric, avg_value, min_value, max_value, count "
-             "FROM daily_aggregates WHERE 1=1");
+    int sql_pos = snprintf(sql, sizeof(sql),
+                          "SELECT station_id, date, metric, avg_value, min_value, max_value, count "
+                          "FROM daily_aggregates WHERE 1=1");
+    if (sql_pos < 0 || (size_t)sql_pos >= sizeof(sql)) {
+        HttpResponse response;
+        response.status_code = 500;
+        response.content_type = "application/json";
+        strncpy(response.body, "{\"error\": \"Query build failed\"}", BUFFER_SIZE - 1);
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        return;
+    }
     
     if (station_id[0]) {
-        strcat(sql, " AND station_id = ?");
+        sql_pos += snprintf(sql + sql_pos, sizeof(sql) - (size_t)sql_pos, " AND station_id = ?");
     }
     if (date[0]) {
-        strcat(sql, " AND date = ?");
+        sql_pos += snprintf(sql + sql_pos, sizeof(sql) - (size_t)sql_pos, " AND date = ?");
     }
     if (metric[0]) {
-        strcat(sql, " AND metric = ?");
+        sql_pos += snprintf(sql + sql_pos, sizeof(sql) - (size_t)sql_pos, " AND metric = ?");
     }
-    strcat(sql, " ORDER BY date DESC LIMIT 100");
+    sql_pos += snprintf(sql + sql_pos, sizeof(sql) - (size_t)sql_pos, " ORDER BY date DESC LIMIT 100");
+
+    if (sql_pos < 0 || (size_t)sql_pos >= sizeof(sql)) {
+        HttpResponse response;
+        response.status_code = 500;
+        response.content_type = "application/json";
+        strncpy(response.body, "{\"error\": \"Query too long\"}", BUFFER_SIZE - 1);
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        return;
+    }
     
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(g_state.db, sql, -1, &stmt, NULL);
@@ -275,12 +368,25 @@ static void handle_daily_query(int client_socket, const char *query_string) {
     
     /* Build JSON response */
     char json[BUFFER_SIZE];
-    int pos = snprintf(json, sizeof(json), "{\"data\": [");
+    int pos = 0;
+    if (append_json(json, sizeof(json), &pos, "{\"data\": [") != 0) {
+        HttpResponse response;
+        response.status_code = 500;
+        response.content_type = "application/json";
+        strncpy(response.body, "{\"error\": \"Response build failed\"}", BUFFER_SIZE - 1);
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        return;
+    }
     int first = 1;
+    int truncated = 0;
     
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (!first) {
-            pos += snprintf(json + pos, sizeof(json) - pos, ",");
+            if (append_json(json, sizeof(json), &pos, ",") != 0) {
+                truncated = 1;
+                break;
+            }
         }
         first = 0;
         
@@ -292,15 +398,36 @@ static void handle_daily_query(int client_socket, const char *query_string) {
         double max = sqlite3_column_double(stmt, 5);
         int count = sqlite3_column_int(stmt, 6);
         
-        pos += snprintf(json + pos, sizeof(json) - pos,
-                       "{\"station_id\":\"%s\",\"date\":\"%s\",\"metric\":\"%s\","
-                       "\"avg\":%.2f,\"min\":%.2f,\"max\":%.2f,\"count\":%d}",
-                       sid, d, m, avg, min, max, count);
+        if (append_json(json, sizeof(json), &pos,
+                        "{\"station_id\":\"%s\",\"date\":\"%s\",\"metric\":\"%s\","
+                        "\"avg\":%.2f,\"min\":%.2f,\"max\":%.2f,\"count\":%d}",
+                        sid ? sid : "", d ? d : "", m ? m : "", avg, min, max, count) != 0) {
+            truncated = 1;
+            break;
+        }
     }
     
     sqlite3_finalize(stmt);
-    
-    pos += snprintf(json + pos, sizeof(json) - pos, "]}");
+
+    if (truncated) {
+        if (append_json(json, sizeof(json), &pos, "],\"truncated\":true}") != 0) {
+            HttpResponse response;
+            response.status_code = 500;
+            response.content_type = "application/json";
+            strncpy(response.body, "{\"error\": \"Response build failed\"}", BUFFER_SIZE - 1);
+            response.body[BUFFER_SIZE - 1] = '\0';
+            send_http_response(client_socket, &response);
+            return;
+        }
+    } else if (append_json(json, sizeof(json), &pos, "]}") != 0) {
+        HttpResponse response;
+        response.status_code = 500;
+        response.content_type = "application/json";
+        strncpy(response.body, "{\"error\": \"Response build failed\"}", BUFFER_SIZE - 1);
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        return;
+    }
     
     HttpResponse response;
     response.status_code = 200;
@@ -330,22 +457,56 @@ static void handle_stations(int client_socket) {
     }
     
     char json[BUFFER_SIZE];
-    int pos = snprintf(json, sizeof(json), "{\"stations\": [");
+    int pos = 0;
+    if (append_json(json, sizeof(json), &pos, "{\"stations\": [") != 0) {
+        HttpResponse response;
+        response.status_code = 500;
+        response.content_type = "application/json";
+        strncpy(response.body, "{\"error\": \"Response build failed\"}", BUFFER_SIZE - 1);
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        return;
+    }
     int first = 1;
+    int truncated = 0;
     
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (!first) {
-            pos += snprintf(json + pos, sizeof(json) - pos, ",");
+            if (append_json(json, sizeof(json), &pos, ",") != 0) {
+                truncated = 1;
+                break;
+            }
         }
         first = 0;
         
         const char *sid = (const char *)sqlite3_column_text(stmt, 0);
-        pos += snprintf(json + pos, sizeof(json) - pos, "\"%s\"", sid);
+        if (append_json(json, sizeof(json), &pos, "\"%s\"", sid ? sid : "") != 0) {
+            truncated = 1;
+            break;
+        }
     }
     
     sqlite3_finalize(stmt);
-    
-    pos += snprintf(json + pos, sizeof(json) - pos, "]}");
+
+    if (truncated) {
+        if (append_json(json, sizeof(json), &pos, "],\"truncated\":true}") != 0) {
+            HttpResponse response;
+            response.status_code = 500;
+            response.content_type = "application/json";
+            strncpy(response.body, "{\"error\": \"Response build failed\"}", BUFFER_SIZE - 1);
+            response.body[BUFFER_SIZE - 1] = '\0';
+            send_http_response(client_socket, &response);
+            return;
+        }
+    } else if (append_json(json, sizeof(json), &pos, "]}") != 0) {
+        HttpResponse response;
+        response.status_code = 500;
+        response.content_type = "application/json";
+        strncpy(response.body, "{\"error\": \"Response build failed\"}", BUFFER_SIZE - 1);
+        response.body[BUFFER_SIZE - 1] = '\0';
+        send_http_response(client_socket, &response);
+        return;
+    }
     
     HttpResponse response;
     response.status_code = 200;
@@ -388,6 +549,9 @@ static const char *get_status_text(int code) {
 /* URL decode */
 static char *url_decode(const char *str) {
     char *decoded = malloc(strlen(str) + 1);
+    if (!decoded) {
+        return NULL;
+    }
     char *p = decoded;
     
     while (*str) {
@@ -415,6 +579,11 @@ static void cleanup(void) {
     if (g_state.server_socket > 0) {
         close(g_state.server_socket);
         g_state.server_socket = -1;
+    }
+
+    if (g_state.api_thread_started) {
+        pthread_join(g_state.api_thread, NULL);
+        g_state.api_thread_started = 0;
     }
     
     if (g_state.db) {
@@ -499,6 +668,13 @@ int main(int argc, char *const argv[]) {
         cleanup();
         return 1;
     }
+
+    if (pthread_create(&g_state.api_thread, NULL, api_server_thread, NULL) != 0) {
+        LOG_ERROR(&g_state.logger, "Failed to create API thread");
+        cleanup();
+        return 1;
+    }
+    g_state.api_thread_started = 1;
     
     LOG_INFO(&g_state.logger, "Query Service v%s started", VERSION);
     
@@ -513,22 +689,7 @@ int main(int argc, char *const argv[]) {
             config_parse(config_file, parse_config_handler, &g_state.config);
         }
         
-        /* Accept connections */
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        int client_socket = accept(g_state.server_socket, (struct sockaddr *)&client_addr, &addr_len);
-        
-        if (client_socket < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                usleep(10000); /* 10ms */
-                continue;
-            }
-            LOG_ERROR(&g_state.logger, "Accept failed: %s", strerror(errno));
-            continue;
-        }
-        
-        /* Handle request */
-        handle_request(client_socket);
+        usleep(10000); /* 10ms */
     }
     
     cleanup();

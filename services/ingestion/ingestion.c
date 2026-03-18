@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <errno.h>
+#include <pthread.h>
 #include <sqlite3.h>
 
 /* Shared library headers */
@@ -48,6 +49,8 @@ typedef struct {
     int server_socket;
     Logger logger;
     DaemonState daemon;
+    pthread_t api_thread;
+    int api_thread_started;
     ProcessedFileInfo *processed_files;
 } IngestionState;
 
@@ -68,6 +71,8 @@ static void cleanup(void);
 static void process_csv_files(void);
 static int start_api_server(void);
 static void handle_api_request(int client_socket);
+static void handle_pending_api_connections(void);
+static void *api_server_thread(void *arg);
 static void send_http_response(int client_socket, HttpResponse *response);
 static const char *get_status_text(int code);
 static ProcessedFileInfo *find_processed_file(const char *filepath);
@@ -496,6 +501,35 @@ static int start_api_server(void) {
     return 0;
 }
 
+static void handle_pending_api_connections(void) {
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+
+    while (1) {
+        int client_socket = accept(g_state.server_socket, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_socket < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+
+            LOG_WARN(&g_state.logger, "Accept failed: %s", strerror(errno));
+            break;
+        }
+
+        handle_api_request(client_socket);
+        addr_len = sizeof(client_addr);
+    }
+}
+
+static void *api_server_thread(void *arg __attribute__((unused))) {
+    while (!daemon_should_stop(&g_state.daemon) && g_state.server_socket >= 0) {
+        handle_pending_api_connections();
+        usleep(10000); /* 10ms */
+    }
+
+    return NULL;
+}
+
 /* Handle API request */
 static void handle_api_request(int client_socket) {
     char buffer[MAX_REQUEST_SIZE];
@@ -700,6 +734,11 @@ static void cleanup(void) {
         close(g_state.server_socket);
         g_state.server_socket = -1;
     }
+
+    if (g_state.api_thread_started) {
+        pthread_join(g_state.api_thread, NULL);
+        g_state.api_thread_started = 0;
+    }
     
     if (g_state.db) {
         sqlite3_close(g_state.db);
@@ -792,6 +831,13 @@ int main(int argc, char *const argv[]) {
         cleanup();
         return 1;
     }
+
+    if (pthread_create(&g_state.api_thread, NULL, api_server_thread, NULL) != 0) {
+        LOG_ERROR(&g_state.logger, "Failed to create API thread");
+        cleanup();
+        return 1;
+    }
+    g_state.api_thread_started = 1;
     
     LOG_INFO(&g_state.logger, "Ingestion Service v%s started", VERSION);
     LOG_INFO(&g_state.logger, "Watching directory: %s", g_state.config.csv_directory);
@@ -802,22 +848,13 @@ int main(int argc, char *const argv[]) {
     daemon_write_pid_file(DEFAULT_PID_FILE);
     
     /* Main loop */
-    time_t last_check = 0;
+    time_t last_check = time(NULL);
     
     while (!daemon_should_stop(&g_state.daemon)) {
         /* Check for config reload */
         if (daemon_should_reload(&g_state.daemon)) {
             LOG_INFO(&g_state.logger, "Reloading configuration...");
             config_parse(config_file, parse_config_handler, &g_state.config);
-        }
-        
-        /* Accept API connections */
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        int client_socket = accept(g_state.server_socket, (struct sockaddr *)&client_addr, &addr_len);
-        
-        if (client_socket >= 0) {
-            handle_api_request(client_socket);
         }
         
         /* Check for CSV files */

@@ -9,7 +9,7 @@ RUN cd /tmp/shared && make clean && make
 
 COPY services/query/ /build/
 
-RUN gcc -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L     -I/tmp/shared/include     -o query query.c     -lsqlite3 -L/tmp/shared/lib -lweather
+RUN gcc -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L     -I/tmp/shared/include     -o query query.c     -lsqlite3 -L/tmp/shared/lib -lweather -pthread
 
 FROM alpine:3.19
 

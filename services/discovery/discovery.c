@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <netdb.h>
 #include <sys/time.h>
+#include <pthread.h>
 
 /* Shared library headers */
 #include "common.h"
@@ -76,6 +77,9 @@ typedef struct {
     int node_count;
     Logger logger;
     DaemonState daemon;
+    pthread_t udp_thread;
+    int udp_thread_started;
+    pthread_mutex_t state_mutex;
 } DiscoveryState;
 
 static DiscoveryState g_state = {0};
@@ -96,6 +100,8 @@ static void start_election(void);
 static void handle_election_message(const char *sender_id);
 static void handle_coordinator_message(const char *leader_id);
 static void check_leader_health(void);
+static void process_incoming_udp_messages(void);
+static void *udp_receiver_thread(void *arg);
 static void cleanup(void);
 
 /* Configuration handler callback */
@@ -235,10 +241,18 @@ static void send_discovery_message(void) {
     sendto(g_state.udp_socket, msg, strlen(msg), 0, 
            (struct sockaddr *)&addr, sizeof(addr));
     
+    pthread_mutex_lock(&g_state.state_mutex);
+    int known_count = g_state.config.known_node_count;
+    NodeInfo known_nodes[MAX_NODES];
+    for (int i = 0; i < known_count; i++) {
+        known_nodes[i] = g_state.config.known_nodes[i];
+    }
+    pthread_mutex_unlock(&g_state.state_mutex);
+
     /* Send to known nodes */
-    for (int i = 0; i < g_state.config.known_node_count; i++) {
-        addr.sin_addr.s_addr = inet_addr(g_state.config.known_nodes[i].address);
-        addr.sin_port = htons(g_state.config.known_nodes[i].port);
+    for (int i = 0; i < known_count; i++) {
+        addr.sin_addr.s_addr = inet_addr(known_nodes[i].address);
+        addr.sin_port = htons(known_nodes[i].port);
         sendto(g_state.udp_socket, msg, strlen(msg), 0,
                (struct sockaddr *)&addr, sizeof(addr));
     }
@@ -257,11 +271,19 @@ static void send_heartbeat(void) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(g_state.config.discovery_port);
     
+    pthread_mutex_lock(&g_state.state_mutex);
+    int node_count = g_state.node_count;
+    NodeInfo cluster_nodes[MAX_NODES];
+    for (int i = 0; i < node_count; i++) {
+        cluster_nodes[i] = g_state.cluster_nodes[i];
+    }
+    pthread_mutex_unlock(&g_state.state_mutex);
+
     /* Send to all known cluster nodes */
-    for (int i = 0; i < g_state.node_count; i++) {
-        if (strcmp(g_state.cluster_nodes[i].id, g_state.config.node_id) != 0) {
-            addr.sin_addr.s_addr = inet_addr(g_state.cluster_nodes[i].address);
-            addr.sin_port = htons(g_state.cluster_nodes[i].port);
+    for (int i = 0; i < node_count; i++) {
+        if (strcmp(cluster_nodes[i].id, g_state.config.node_id) != 0) {
+            addr.sin_addr.s_addr = inet_addr(cluster_nodes[i].address);
+            addr.sin_port = htons(cluster_nodes[i].port);
             sendto(g_state.udp_socket, msg, strlen(msg), 0,
                    (struct sockaddr *)&addr, sizeof(addr));
         }
@@ -458,12 +480,21 @@ static int check_tcp_health(const char *fqdn, int port) {
 
 /* Check health of configured peer endpoints */
 static void check_peer_endpoints(void) {
-    for (int i = 0; i < g_state.config.peer_endpoint_count; i++) {
-        PeerEndpoint *peer = &g_state.config.peer_endpoints[i];
+    pthread_mutex_lock(&g_state.state_mutex);
+    int peer_count = g_state.config.peer_endpoint_count;
+    PeerEndpoint peers[MAX_NODES];
+    for (int i = 0; i < peer_count; i++) {
+        peers[i] = g_state.config.peer_endpoints[i];
+    }
+    pthread_mutex_unlock(&g_state.state_mutex);
+
+    for (int i = 0; i < peer_count; i++) {
+        PeerEndpoint *peer = &peers[i];
         int is_healthy = (check_tcp_health(peer->fqdn, peer->port) == 0);
         
         /* Check if we already know about this peer */
         int found = 0;
+        pthread_mutex_lock(&g_state.state_mutex);
         for (int j = 0; j < g_state.node_count; j++) {
             if (strcmp(g_state.cluster_nodes[j].id, peer->node_id) == 0) {
                 if (is_healthy) {
@@ -494,13 +525,22 @@ static void check_peer_endpoints(void) {
                         peer->node_id, peer->fqdn, peer->port);
             }
         }
+        pthread_mutex_unlock(&g_state.state_mutex);
     }
 }
 
 /* Send heartbeat to peer endpoints via TCP */
 static void send_tcp_heartbeat_to_peers(void) {
-    for (int i = 0; i < g_state.config.peer_endpoint_count; i++) {
-        PeerEndpoint *peer = &g_state.config.peer_endpoints[i];
+    pthread_mutex_lock(&g_state.state_mutex);
+    int peer_count = g_state.config.peer_endpoint_count;
+    PeerEndpoint peers[MAX_NODES];
+    for (int i = 0; i < peer_count; i++) {
+        peers[i] = g_state.config.peer_endpoints[i];
+    }
+    pthread_mutex_unlock(&g_state.state_mutex);
+
+    for (int i = 0; i < peer_count; i++) {
+        PeerEndpoint *peer = &peers[i];
         
         char ip[64];
         if (resolve_fqdn(peer->fqdn, ip, sizeof(ip)) != 0) {
@@ -534,6 +574,69 @@ static void send_tcp_heartbeat_to_peers(void) {
     }
 }
 
+static void process_incoming_udp_messages(void) {
+    while (1) {
+        char buffer[BUFFER_SIZE];
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+
+        int len = recvfrom(g_state.udp_socket, buffer, sizeof(buffer) - 1, 0,
+                          (struct sockaddr *)&from, &from_len);
+
+        if (len < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            LOG_WARN(&g_state.logger, "UDP receive failed: %s", strerror(errno));
+            break;
+        }
+
+        if (len == 0) {
+            continue;
+        }
+
+        buffer[len] = '\0';
+
+        pthread_mutex_lock(&g_state.state_mutex);
+        if (strncmp(buffer, MSG_DISCOVER, strlen(MSG_DISCOVER)) == 0) {
+            handle_discovery_message(buffer, &from);
+        } else if (strncmp(buffer, MSG_HEARTBEAT, strlen(MSG_HEARTBEAT)) == 0) {
+            char node_id[MAX_NODE_ID_LEN];
+            int is_leader;
+            if (sscanf(buffer, "HEARTBEAT:%63s:%d", node_id, &is_leader) == 2) {
+                for (int i = 0; i < g_state.node_count; i++) {
+                    if (strcmp(g_state.cluster_nodes[i].id, node_id) == 0) {
+                        g_state.cluster_nodes[i].last_seen = time(NULL);
+                        g_state.cluster_nodes[i].is_healthy = 1;
+                        g_state.cluster_nodes[i].is_leader = is_leader;
+                        break;
+                    }
+                }
+            }
+        } else if (strncmp(buffer, MSG_ELECTION, strlen(MSG_ELECTION)) == 0) {
+            char sender_id[MAX_NODE_ID_LEN];
+            if (sscanf(buffer, "ELECTION:%63s", sender_id) == 1) {
+                handle_election_message(sender_id);
+            }
+        } else if (strncmp(buffer, MSG_COORDINATOR, strlen(MSG_COORDINATOR)) == 0) {
+            char leader_id[MAX_NODE_ID_LEN];
+            if (sscanf(buffer, "COORDINATOR:%63s", leader_id) == 1) {
+                handle_coordinator_message(leader_id);
+            }
+        }
+        pthread_mutex_unlock(&g_state.state_mutex);
+    }
+}
+
+static void *udp_receiver_thread(void *arg __attribute__((unused))) {
+    while (!daemon_should_stop(&g_state.daemon) && g_state.udp_socket >= 0) {
+        process_incoming_udp_messages();
+        usleep(10000); /* 10ms */
+    }
+
+    return NULL;
+}
+
 /* Cleanup function */
 static void cleanup(void) {
     LOG_INFO(&g_state.logger, "Cleaning up...");
@@ -542,6 +645,13 @@ static void cleanup(void) {
         close(g_state.udp_socket);
         g_state.udp_socket = -1;
     }
+
+    if (g_state.udp_thread_started) {
+        pthread_join(g_state.udp_thread, NULL);
+        g_state.udp_thread_started = 0;
+    }
+
+    pthread_mutex_destroy(&g_state.state_mutex);
     
     daemon_cleanup(&g_state.daemon);
     logger_close(&g_state.logger);
@@ -608,6 +718,8 @@ int main(int argc, char *const argv[]) {
     
     /* Initialize daemon state */
     daemon_init(&g_state.daemon, &g_state.logger, DEFAULT_PID_FILE, cleanup);
+
+    pthread_mutex_init(&g_state.state_mutex, NULL);
     
     /* Setup signal handlers */
     daemon_setup_signals(&g_state.daemon);
@@ -629,6 +741,13 @@ int main(int argc, char *const argv[]) {
     
     /* Send initial discovery */
     send_discovery_message();
+
+    if (pthread_create(&g_state.udp_thread, NULL, udp_receiver_thread, NULL) != 0) {
+        LOG_ERROR(&g_state.logger, "Failed to create UDP receiver thread");
+        cleanup();
+        return 1;
+    }
+    g_state.udp_thread_started = 1;
     
     /* Main loop */
     time_t last_discovery = time(NULL);
@@ -639,46 +758,6 @@ int main(int argc, char *const argv[]) {
         if (daemon_should_reload(&g_state.daemon)) {
             LOG_INFO(&g_state.logger, "Reloading configuration...");
             config_parse(config_file, parse_config_handler, &g_state.config);
-        }
-        
-        /* Receive and process messages */
-        char buffer[BUFFER_SIZE];
-        struct sockaddr_in from;
-        socklen_t from_len = sizeof(from);
-        
-        int len = recvfrom(g_state.udp_socket, buffer, sizeof(buffer) - 1, 0,
-                          (struct sockaddr *)&from, &from_len);
-        
-        if (len > 0) {
-            buffer[len] = '\0';
-            
-            if (strncmp(buffer, MSG_DISCOVER, strlen(MSG_DISCOVER)) == 0) {
-                handle_discovery_message(buffer, &from);
-            } else if (strncmp(buffer, MSG_HEARTBEAT, strlen(MSG_HEARTBEAT)) == 0) {
-                /* Update node health */
-                char node_id[MAX_NODE_ID_LEN];
-                int is_leader;
-                if (sscanf(buffer, "HEARTBEAT:%63s:%d", node_id, &is_leader) == 2) {
-                    for (int i = 0; i < g_state.node_count; i++) {
-                        if (strcmp(g_state.cluster_nodes[i].id, node_id) == 0) {
-                            g_state.cluster_nodes[i].last_seen = time(NULL);
-                            g_state.cluster_nodes[i].is_healthy = 1;
-                            g_state.cluster_nodes[i].is_leader = is_leader;
-                            break;
-                        }
-                    }
-                }
-            } else if (strncmp(buffer, MSG_ELECTION, strlen(MSG_ELECTION)) == 0) {
-                char sender_id[MAX_NODE_ID_LEN];
-                if (sscanf(buffer, "ELECTION:%63s", sender_id) == 1) {
-                    handle_election_message(sender_id);
-                }
-            } else if (strncmp(buffer, MSG_COORDINATOR, strlen(MSG_COORDINATOR)) == 0) {
-                char leader_id[MAX_NODE_ID_LEN];
-                if (sscanf(buffer, "COORDINATOR:%63s", leader_id) == 1) {
-                    handle_coordinator_message(leader_id);
-                }
-            }
         }
         
         /* Periodic tasks */
@@ -701,7 +780,9 @@ int main(int argc, char *const argv[]) {
         
         /* Check leader health */
         if (now - last_health_check >= 2) {
+            pthread_mutex_lock(&g_state.state_mutex);
             check_leader_health();
+            pthread_mutex_unlock(&g_state.state_mutex);
             /* Also check peer endpoints via TCP */
             if (g_state.config.peer_endpoint_count > 0) {
                 check_peer_endpoints();

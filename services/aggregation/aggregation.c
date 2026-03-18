@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <errno.h>
+#include <pthread.h>
 #include <sqlite3.h>
 #include <curl/curl.h>
 
@@ -43,6 +44,8 @@ typedef struct {
     DaemonState daemon;
     int server_socket;
     CURL *curl;
+    pthread_t api_thread;
+    int api_thread_started;
 } AggregationState;
 
 static AggregationState g_state = {0};
@@ -54,6 +57,9 @@ static int fetch_and_aggregate(void);
 static int http_get_with_retry(const char *url, char **response_buffer);
 static size_t write_callback(const void *contents, size_t size, size_t nmemb, void *userp);
 static int start_api_server(void);
+static void handle_api_request(int client_socket);
+static void handle_pending_api_connections(void);
+static void *api_server_thread(void *arg);
 static void cleanup(void);
 static void clear_response_buffer(char **response_buffer);
 
@@ -387,6 +393,35 @@ static int start_api_server(void) {
     return 0;
 }
 
+static void handle_pending_api_connections(void) {
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+
+    while (1) {
+        int client_socket = accept(g_state.server_socket, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_socket < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+
+            LOG_WARN(&g_state.logger, "Accept failed: %s", strerror(errno));
+            break;
+        }
+
+        handle_api_request(client_socket);
+        addr_len = sizeof(client_addr);
+    }
+}
+
+static void *api_server_thread(void *arg __attribute__((unused))) {
+    while (!daemon_should_stop(&g_state.daemon) && g_state.server_socket >= 0) {
+        handle_pending_api_connections();
+        usleep(10000);
+    }
+
+    return NULL;
+}
+
 static void handle_api_request(int client_socket) {
     char buffer[BUFFER_SIZE];
     int bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
@@ -438,6 +473,11 @@ static void cleanup(void) {
     if (g_state.server_socket > 0) {
         close(g_state.server_socket);
         g_state.server_socket = -1;
+    }
+
+    if (g_state.api_thread_started) {
+        pthread_join(g_state.api_thread, NULL);
+        g_state.api_thread_started = 0;
     }
     
     if (g_state.output_db) {
@@ -515,6 +555,12 @@ int main(int argc, char *const argv[]) {
     
     if (start_api_server() != 0) {
         LOG_WARN(&g_state.logger, "Failed to start API server, continuing without it");
+    } else {
+        if (pthread_create(&g_state.api_thread, NULL, api_server_thread, NULL) != 0) {
+            LOG_WARN(&g_state.logger, "Failed to create API thread, continuing without threaded API handling");
+        } else {
+            g_state.api_thread_started = 1;
+        }
     }
     
     LOG_INFO(&g_state.logger, "Aggregation Service v%s started", VERSION);
@@ -532,15 +578,6 @@ int main(int argc, char *const argv[]) {
         if (daemon_should_reload(&g_state.daemon)) {
             LOG_INFO(&g_state.logger, "Reloading configuration...");
             config_parse(config_file, parse_config_handler, &g_state.config);
-        }
-        
-        if (g_state.server_socket > 0) {
-            struct sockaddr_in client_addr;
-            socklen_t addr_len = sizeof(client_addr);
-            int client_socket = accept(g_state.server_socket, (struct sockaddr *)&client_addr, &addr_len);
-            if (client_socket >= 0) {
-                handle_api_request(client_socket);
-            }
         }
         
         time_t now = time(NULL);

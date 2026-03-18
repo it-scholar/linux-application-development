@@ -3,9 +3,11 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L \
-         -I../shared/include
+		 -I../shared/include \
+		 -pthread
 LDFLAGS = -lsqlite3 \
-          -L../shared/lib -lweather
+		  -L../shared/lib -lweather \
+		  -pthread
 TARGET = query
 SRC = query.c
 

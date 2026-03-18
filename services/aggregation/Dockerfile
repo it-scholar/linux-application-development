@@ -17,7 +17,7 @@ COPY services/aggregation/ /build/
 RUN gcc -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L \
     -I/tmp/shared/include \
     -o aggregation aggregation.c \
-    -lsqlite3 -lcurl -L/tmp/shared/lib -lweather
+    -lsqlite3 -lcurl -L/tmp/shared/lib -lweather -pthread
 
 FROM alpine:3.19
 

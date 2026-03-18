@@ -12,7 +12,7 @@ COPY services/ingestion/ /build/
 RUN gcc -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L \
     -I/tmp/shared/include \
     -o ingestion ingestion.c \
-    -lsqlite3 -L/tmp/shared/lib -lweather
+    -lsqlite3 -L/tmp/shared/lib -lweather -pthread
 
 FROM alpine:3.19
 

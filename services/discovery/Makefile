@@ -3,8 +3,10 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L \
-         -I../shared/include
-LDFLAGS = -L../shared/lib -lweather
+		 -I../shared/include \
+		 -pthread
+LDFLAGS = -L../shared/lib -lweather \
+		  -pthread
 TARGET = discovery
 SRC = discovery.c
 
